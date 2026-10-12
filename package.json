@@ -1,0 +1,17 @@
+{
+  "name": "site-filme",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Catálogo com login e aprovação que usa a API embedplayapi.top (Netlify Functions + Blobs)",
+  "scripts": {
+    "dev": "npx --yes netlify-cli@24 dev",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^10.7.13"
+  }
+}
