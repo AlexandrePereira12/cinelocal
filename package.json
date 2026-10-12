@@ -6,6 +6,7 @@
   "description": "Catálogo com login e aprovação que usa a API embedplayapi.top (Netlify Functions + Blobs)",
   "scripts": {
     "dev": "npx --yes netlify-cli@24 dev",
+    "atualizar-catalogo": "node scripts/atualizar-catalogo.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

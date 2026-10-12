@@ -8,7 +8,7 @@ const TOKEN_KEY = 'cine.token';
 const LIST_TITLES = {
   'trending-movies': 'Filmes em alta',
   'trending-shows': 'Séries em alta',
-  'top-movies': 'Top IMDb',
+  'top-movies': 'Mais avaliados',
   'recent-movies': 'Lançamentos',
   'library-movies': 'Filmes',
   'library-shows': 'Séries',
@@ -175,6 +175,7 @@ function hero(items) {
   const tag = el('span', { class: 'hero-tag' }, 'Em alta');
   const title = el('h1');
   const info = el('p', { class: 'hero-meta' });
+  const overview = el('p', { class: 'hero-overview' });
   const play = el('a', { class: 'btn primary' }, '▶ Assistir');
   const poster = el('img', { class: 'hero-poster', alt: '' });
   const dots = el('div', { class: 'hero-dots' });
@@ -183,7 +184,7 @@ function hero(items) {
     { class: 'hero' },
     bg,
     el('div', { class: 'hero-shade' }),
-    el('div', { class: 'hero-body' }, el('div', { class: 'hero-text' }, tag, title, info, play), poster),
+    el('div', { class: 'hero-body' }, el('div', { class: 'hero-text' }, tag, title, info, overview, play), poster),
     dots,
   );
 
@@ -196,10 +197,13 @@ function hero(items) {
   function show(index, manual) {
     current = index;
     const item = items[index];
-    bg.style.backgroundImage = `url("${posterUrl(item.poster, 'w780')}")`;
+    // Com backdrop (imagem larga do TMDB) o fundo fica nítido; sem ele, usa o pôster ampliado com blur.
+    bg.classList.toggle('sharp', Boolean(item.backdrop));
+    bg.style.backgroundImage = `url("${item.backdrop ? posterUrl(item.backdrop, 'w1280') : posterUrl(item.poster, 'w780')}")`;
     poster.src = posterUrl(item.poster, 'w500');
     title.textContent = item.title;
-    info.textContent = [item.year, item.quality, item.runtime && `${item.runtime} min`].filter(Boolean).join(' · ');
+    info.textContent = [item.year, item.quality, item.rating != null && `★ ${item.rating.toFixed(1)}`, item.runtime && `${item.runtime} min`].filter(Boolean).join(' · ');
+    overview.textContent = item.overview ?? '';
     play.href = watchHref(item);
     buttons.forEach((b, i) => b.classList.toggle('on', i === index));
     if (manual) startRotation();
@@ -385,7 +389,7 @@ async function renderHome(token) {
   if (token !== navToken) return;
 
   const page = el('div');
-  const featured = results[0].status === 'fulfilled' ? results[0].value.items.filter((i) => i.poster).slice(0, HERO_SIZE) : [];
+  const featured = results[0].status === 'fulfilled' ? results[0].value.items.filter((i) => i.poster && i.backdrop).slice(0, HERO_SIZE) : [];
   if (featured.length) page.append(hero(featured));
 
   if (libraryResult.status === 'fulfilled') {

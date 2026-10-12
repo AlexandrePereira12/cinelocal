@@ -323,3 +323,16 @@ test('reenvio que falha não apaga o cadastro pendente', async () => {
   assert.equal((await app.call('POST', '/api/auth/register', { body })).status, 202);
   assert.equal(app.mails.length, 2, 'nova tentativa com o e-mail funcionando reenvia');
 });
+
+test('play usa o metadado do catálogo do servidor e ignora o que o navegador manda', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  const res = await app.call('POST', '/api/play', { token, body: { type: 'movie', id: '777', title: 'Título Falso', year: '1999', poster: '/falso.jpg' } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.title, 'Do Catálogo');
+  assert.equal(res.body.year, '2024');
+  assert.equal(res.body.poster, '/catalogo.jpg');
+
+  const deepLink = await app.call('POST', '/api/play', { token, body: { type: 'movie', id: '777' } });
+  assert.equal(deepLink.body.title, 'Do Catálogo', 'link direto também ganha o título certo');
+});

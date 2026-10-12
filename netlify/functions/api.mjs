@@ -1,9 +1,11 @@
 /*
- * Entrada da Netlify Function: liga o handler às dependências reais (Blobs, Resend, upstream).
+ * Entrada da Netlify Function: liga o handler às dependências reais (Blobs, Resend, catálogo empacotado).
  * Variáveis de ambiente (UI do Netlify, escopo Functions, marcadas como secret): ver .env.example.
  * Código compartilhado fica em netlify/lib/ — qualquer arquivo no topo de netlify/functions/ vira uma função.
+ * O catálogo (netlify/data/catalogo.mjs) é importado como módulo para o esbuild empacotá-lo com a função.
  */
 
+import catalogData from '../data/catalogo.mjs';
 import { createCatalog } from '../lib/catalog.mjs';
 import { createHandler } from '../lib/handler.mjs';
 import { createMailer } from '../lib/mailer.mjs';
@@ -14,7 +16,7 @@ let handler;
 export default async (req, context) => {
   handler ??= createHandler({
     stores: blobsStores(),
-    catalog: createCatalog(),
+    catalog: createCatalog({ data: catalogData }),
     mailer: createMailer(process.env),
     env: process.env,
   });

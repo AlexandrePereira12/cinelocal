@@ -1,223 +1,140 @@
 /*
- * Catálogo do embedplayapi.top.
+ * Catálogo servido a partir da "foto" gerada por scripts/atualizar-catalogo.mjs (netlify/data/catalogo.mjs).
  *
  * Decisões:
- * - A API oficial (`/api/all-ids`) só devolve IDs. Título, ano, pôster e qualidade vêm do HTML das páginas
- *   de catálogo (cards `.movie-card`), convertido para JSON aqui; o front nunca recebe HTML do upstream.
- * - Rotas fixas mapeadas para paths fixos do upstream: nada de proxy de URL arbitrária.
- * - Pôsteres vêm de image.tmdb.org (o mirror do upstream dá 403 fora do site). Sem chave do TMDB não há backdrop.
- * - Séries: a API só responde "existe/não existe" por episódio (`/api/status`), então temporadas e episódios
- *   são descobertos por sondagem em lotes (limitados por invocação) e cacheados em memória da instância.
- * - O upstream fica atrás do Cloudflare e pode recusar IP de datacenter: respostas 403/429/503, ou uma página
- *   de lista sem nenhum card, viram `upstream_blocked` (502 claro) em vez de catálogo vazio silencioso.
+ * - Nenhuma chamada externa em runtime. O embedplayapi.top bloqueia o IP de datacenter da função, então a lista
+ *   do que ele tem e os metadados (TMDB) são coletados no PC do dono e empacotados com a função. O catálogo só
+ *   muda quando o script roda de novo e o site é publicado.
+ * - "Em alta" = popularidade do TMDB na data da foto; "Mais avaliados" = nota com mínimo de votos;
+ *   "Lançamentos" = data de estreia já passada; biblioteca = mais votados (os mais conhecidos primeiro).
+ * - Catálogo vazio responde 503 `catalog_empty` (não 403/404: o `netlify dev` reenvia esses dois para outro caminho).
+ * - A busca é local, sem acento e sem diferenciar maiúsculas; cada palavra digitada precisa ser o começo de uma
+ *   palavra do título (ou do título original). Começo do título vem primeiro, depois a popularidade.
+ * - Séries: temporadas e episódios vêm da contagem do TMDB (sem sondar o provedor).
  */
 
 import { HttpError } from './errors.mjs';
 
 export const EMBED_BASE = 'https://embedplayapi.top/embed';
 
-const UPSTREAM = 'https://embedplayapi.top';
-const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
-const CATALOG_TTL_MS = 10 * 60 * 1000;
-const STATUS_TTL_MS = 60 * 60 * 1000;
-const FETCH_TIMEOUT_MS = 10000;
-const MAX_CONCURRENT = 8;
-const MAX_CACHE_ENTRIES = 2000;
-const SEASON_BATCHES = 3;
-const SEASON_BATCH_SIZE = 10;
-const EPISODE_BATCHES = 4;
-const EPISODE_BATCH_SIZE = 25;
+const PAGE_SIZE = 30;
+const TRENDING_CAP = 60;
+const TOP_MIN_VOTES = 500;
+const SEARCH_LIMIT = 40;
 
-const LISTS = {
-  'trending-movies': { path: '/trending/movies', type: 'movie' },
-  'trending-shows': { path: '/trending/shows', type: 'tv' },
-  'top-movies': { path: '/imdb-top/movies', type: 'movie' },
-  'recent-movies': { path: '/recent-releases/movies', type: 'movie' },
-  'library-movies': { path: '/library/movies', type: 'movie' },
-  'library-shows': { path: '/library/shows', type: 'tv' },
-};
+const normalize = (text) =>
+  String(text ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const byDesc = (key) => (a, b) => (b[key] ?? 0) - (a[key] ?? 0);
 
-function decodeEntities(text) {
-  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity) => {
-    if (entity[0] === '#') {
-      const hex = entity[1].toLowerCase() === 'x';
-      const code = parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
-    }
-    return ENTITIES[entity.toLowerCase()] ?? match;
-  });
+function toItem(type, entry) {
+  return {
+    id: String(entry.i),
+    type,
+    title: entry.t,
+    year: entry.y ?? null,
+    poster: entry.p ?? null,
+    backdrop: entry.b ?? null,
+    overview: entry.o ?? null,
+    rating: entry.r ?? null,
+    runtime: entry.rt ?? null,
+  };
 }
 
-function textOf(html) {
-  return decodeEntities(html.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-}
+export function createCatalog({ data, now = Date.now }) {
+  const movies = data?.movies ?? [];
+  const series = data?.series ?? [];
+  const seriesById = new Map(series.map((entry) => [String(entry.i), entry]));
+  const moviesById = new Map(movies.map((entry) => [String(entry.i), entry]));
 
-export function parseCards(html, fixedType) {
-  const items = [];
-  const seen = new Set();
+  const byPopularity = (list) => [...list].sort(byDesc('v'));
+  const byVotes = (list) => [...list].sort(byDesc('n'));
 
-  for (const card of html.split('card movie-card').slice(1)) {
-    const link = card.match(/\/embed\/([A-Za-z0-9]+)(?:\/(\d+)\/(\d+))?/);
-    const titleBlock = card.match(/class="title mt-0">([\s\S]*?)<\/p>/);
-    if (!link || !titleBlock || seen.has(link[1])) continue;
-    seen.add(link[1]);
-
-    const title = textOf(titleBlock[1]);
-    const titleYear = title.match(/^(.*\S)\s+-\s+(\d{4})$/);
-    const poster = card.match(/url\(https?:\/\/[^)\s]*\/tmdb\/w\d+(\/[\w-]+\.(?:jpg|png|webp))\)/);
-    // O badge do topo é a qualidade (HD/CAM) ou, no Top IMDb, a nota.
-    const badge = textOf(card.match(/class="top">([\s\S]*?)<\/div>/)?.[1] ?? '');
-    const isRating = /^\d+(\.\d+)?$/.test(badge);
-    const runtime = textOf(card.match(/class="bottom">([\s\S]*?)<\/div>/)?.[1] ?? '').match(/(\d+)\s*Min/i);
-
-    // Busca mistura filmes e séries: link com /T/E é série; sem runtime também (cards de série não trazem).
-    const type = fixedType ?? (link[2] || !runtime ? 'tv' : 'movie');
-
-    items.push({
-      id: link[1],
-      type,
-      title: titleYear ? titleYear[1] : title,
-      year: titleYear ? titleYear[2] : null,
-      poster: poster ? poster[1] : null,
-      quality: badge && !isRating ? badge : null,
-      rating: isRating ? Number(badge) : null,
-      runtime: runtime ? Number(runtime[1]) : null,
-    });
-  }
-  return items;
-}
-
-function parseTotalPages(html) {
-  const pages = [...html.matchAll(/[?&]page=(\d+)/g)].map((m) => Number(m[1]));
-  return pages.length ? Math.max(...pages) : 1;
-}
-
-export function createCatalog({ fetchImpl = fetch, now = Date.now } = {}) {
-  let active = 0;
-  const waiting = [];
+  const lists = {
+    'trending-movies': { type: 'movie', cap: TRENDING_CAP, items: () => byPopularity(movies) },
+    'trending-shows': { type: 'tv', cap: TRENDING_CAP, items: () => byPopularity(series) },
+    'top-movies': {
+      type: 'movie',
+      cap: TRENDING_CAP,
+      items: () => movies.filter((e) => e.r != null && e.n >= TOP_MIN_VOTES).sort((a, b) => b.r - a.r || b.n - a.n),
+    },
+    'recent-movies': {
+      type: 'movie',
+      cap: TRENDING_CAP,
+      items: () => {
+        const today = new Date(now()).toISOString().slice(0, 10);
+        return movies.filter((e) => e.d && e.d <= today).sort((a, b) => (a.d < b.d ? 1 : a.d > b.d ? -1 : (b.v ?? 0) - (a.v ?? 0)));
+      },
+    },
+    'library-movies': { type: 'movie', items: () => byVotes(movies) },
+    'library-shows': { type: 'tv', items: () => byVotes(series) },
+  };
   const cache = new Map();
 
-  function limited(task) {
-    return new Promise((resolve, reject) => {
-      const run = () => {
-        active++;
-        task()
-          .then(resolve, reject)
-          .finally(() => {
-            active--;
-            waiting.shift()?.();
-          });
-      };
-      if (active < MAX_CONCURRENT) run();
-      else waiting.push(run);
-    });
-  }
+  const searchIndex = [
+    ...movies.map((entry) => ({ type: 'movie', entry })),
+    ...series.map((entry) => ({ type: 'tv', entry })),
+  ].map((row) => {
+    const title = normalize(row.entry.t);
+    return { ...row, title, titleWords: title.split(' '), words: normalize(`${row.entry.t} ${row.entry.ot ?? ''}`).split(' ') };
+  });
 
-  async function fetchOnce(pathAndQuery, ajax) {
-    let res;
-    try {
-      res = await fetchImpl(UPSTREAM + pathAndQuery, {
-        headers: {
-          'User-Agent': USER_AGENT,
-          'Accept-Language': 'pt-BR,pt;q=0.9',
-          ...(ajax ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
-        },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-    } catch {
-      throw new HttpError(502, 'Catálogo indisponível a partir do servidor', 'upstream_unreachable');
+  function requireData() {
+    if (!movies.length && !series.length) {
+      throw new HttpError(503, 'O catálogo ainda não foi gerado. Rode o script de atualização e publique de novo.', 'catalog_empty');
     }
-    if ([403, 429, 503].includes(res.status)) {
-      throw new HttpError(502, 'Catálogo indisponível a partir do servidor', 'upstream_blocked');
-    }
-    if (!res.ok) throw new HttpError(502, 'Catálogo indisponível a partir do servidor', 'upstream_error');
-    return res;
-  }
-
-  // O upstream oscila: uma nova tentativa cobre timeout/5xx pontual (bloqueio 403/429/503 não é repetido).
-  function fetchUpstream(pathAndQuery, { ajax = false } = {}) {
-    return limited(async () => {
-      try {
-        return await fetchOnce(pathAndQuery, ajax);
-      } catch (err) {
-        if (err.code === 'upstream_blocked') throw err;
-        return fetchOnce(pathAndQuery, ajax);
-      }
-    });
-  }
-
-  async function cached(key, ttl, loader) {
-    const hit = cache.get(key);
-    if (hit && now() - hit.at < ttl) return hit.value;
-    if (cache.size >= MAX_CACHE_ENTRIES) cache.clear();
-    const entry = { at: now(), value: loader() };
-    cache.set(key, entry);
-    try {
-      return await entry.value;
-    } catch (err) {
-      if (cache.get(key) === entry) cache.delete(key);
-      throw err;
-    }
-  }
-
-  function episodeExists(id, season, episode) {
-    return cached(`status:${id}:${season}:${episode}`, STATUS_TTL_MS, async () => {
-      const res = await fetchUpstream(`/api/status?tmdb=${id}&sea=${season}&epi=${episode}&type=tv`);
-      return (await res.json()).status === 'success';
-    });
-  }
-
-  async function probe(from, count, check) {
-    const numbers = Array.from({ length: count }, (_, i) => from + i);
-    const results = await Promise.all(numbers.map(check));
-    return numbers.map((n, i) => ({ n, ok: results[i] }));
-  }
-
-  // Sonda em lotes; segue para o próximo lote só se o último número do lote atual existe.
-  async function discover(batches, size, check) {
-    const found = [];
-    for (let b = 0; b < batches; b++) {
-      const batch = await probe(b * size + 1, size, check);
-      found.push(...batch.filter((r) => r.ok).map((r) => r.n));
-      if (!batch.at(-1).ok) break;
-    }
-    return found;
   }
 
   return {
     async list(name, page) {
-      const list = LISTS[name];
+      const list = lists[name];
       if (!list) throw new HttpError(404, 'Lista desconhecida', 'not_found');
-      return cached(`list:${name}:${page}`, CATALOG_TTL_MS, async () => {
-        const html = await (await fetchUpstream(`${list.path}${page > 1 ? `?page=${page}` : ''}`)).text();
-        const items = parseCards(html, list.type);
-        if (page === 1 && !items.length) {
-          throw new HttpError(502, 'Catálogo indisponível a partir do servidor', 'upstream_blocked');
-        }
-        return { page, totalPages: parseTotalPages(html), items };
-      });
+      requireData();
+      if (!cache.has(name)) {
+        const all = list.items();
+        cache.set(name, list.cap ? all.slice(0, list.cap) : all);
+      }
+      const all = cache.get(name);
+      const start = (page - 1) * PAGE_SIZE;
+      return {
+        page,
+        totalPages: Math.max(1, Math.ceil(all.length / PAGE_SIZE)),
+        items: all.slice(start, start + PAGE_SIZE).map((entry) => toItem(list.type, entry)),
+      };
     },
 
     async search(term) {
-      return cached(`search:${term.toLowerCase()}`, CATALOG_TTL_MS, async () => {
-        const res = await fetchUpstream(`/search?term=${encodeURIComponent(term)}`, { ajax: true });
-        return { items: parseCards(await res.text(), null) };
-      });
+      requireData();
+      const words = normalize(term).split(' ').filter(Boolean);
+      if (!words.length) return { items: [] };
+      const matches = [];
+      for (const row of searchIndex) {
+        if (!words.every((word) => row.words.some((w) => w.startsWith(word)))) continue;
+        const rank = row.title.startsWith(words[0]) ? 0 : row.titleWords.some((w) => w.startsWith(words[0])) ? 1 : 2;
+        matches.push({ rank, popularity: row.entry.v ?? 0, row });
+      }
+      matches.sort((a, b) => a.rank - b.rank || b.popularity - a.popularity);
+      return { items: matches.slice(0, SEARCH_LIMIT).map(({ row }) => toItem(row.type, row.entry)) };
     },
 
     async seasons(id) {
-      return cached(`seasons:${id}`, STATUS_TTL_MS, async () => ({
-        seasons: await discover(SEASON_BATCHES, SEASON_BATCH_SIZE, (s) => episodeExists(id, s, 1)),
-      }));
+      return { seasons: (seriesById.get(id)?.s ?? []).map(([number]) => number) };
     },
 
     async episodes(id, season) {
-      return cached(`episodes:${id}:${season}`, STATUS_TTL_MS, async () => ({
-        season,
-        episodes: await discover(EPISODE_BATCHES, EPISODE_BATCH_SIZE, (e) => episodeExists(id, season, e)),
-      }));
+      const found = (seriesById.get(id)?.s ?? []).find(([number]) => number === season);
+      return { season, episodes: found ? Array.from({ length: found[1] }, (_, i) => i + 1) : [] };
+    },
+
+    // Metadado oficial de um título (o servidor não depende do que o navegador manda).
+    lookup(type, id) {
+      const entry = (type === 'tv' ? seriesById : moviesById).get(id);
+      return entry ? toItem(type, entry) : null;
     },
   };
 }

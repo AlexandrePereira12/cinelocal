@@ -285,15 +285,17 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
     const poster = body.poster == null ? null : v.validPoster(body.poster);
     if ((body.title != null && !title) || (body.year != null && !year) || (body.poster != null && !poster)) throw v.badRequest();
 
+    // O catálogo do servidor é a fonte do metadado; o que o navegador manda só vale para título que saiu do catálogo.
+    const known = catalog.lookup(type, mediaId);
     const item = await updateLibrary(uid, (library) => {
       const itemKey = `${type}:${mediaId}`;
       const prev = library.items[itemKey];
       const next = {
         type,
         id: mediaId,
-        title: title ?? prev?.title ?? `Título ${mediaId}`,
-        year: year ?? prev?.year ?? null,
-        poster: poster ?? prev?.poster ?? null,
+        title: known?.title ?? title ?? prev?.title ?? `Título ${mediaId}`,
+        year: known?.year ?? year ?? prev?.year ?? null,
+        poster: known?.poster ?? poster ?? prev?.poster ?? null,
         season: type === 'tv' ? (season ?? prev?.season ?? 1) : null,
         episode: type === 'tv' ? (episode ?? (season != null ? 1 : (prev?.episode ?? 1))) : null,
         done: prev?.done ?? false,

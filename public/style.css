@@ -61,11 +61,15 @@ button, select, input { font: inherit; color: inherit; }
 main { flex: 1; width: 100%; }
 .page { padding: 28px 4vw 48px; }
 .page h1 { margin: 0 0 20px; font-size: 26px; }
+.footer p { margin: 2px 0; }
 .footer { padding: 20px 4vw; color: var(--muted); font-size: 13px; text-align: center; border-top: 1px solid #ffffff10; }
 
 /* Hero */
 .hero { position: relative; min-height: 440px; overflow: hidden; display: flex; align-items: center; }
 .hero-bg { position: absolute; inset: -30px; background-size: cover; background-position: center; filter: blur(28px) brightness(.55); transform: scale(1.05); }
+.hero-bg.sharp { inset: 0; filter: brightness(.7); transform: none; }
+.hero-overview { max-width: 52ch; margin: 0 0 22px; color: #d6d6e0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.hero-overview:empty { display: none; }
 .hero-shade { position: absolute; inset: 0; background: linear-gradient(90deg, var(--bg) 0%, #0b0b10b0 45%, #0b0b1030 100%), linear-gradient(0deg, var(--bg) 0%, transparent 35%); }
 .hero-body { position: relative; z-index: 1; width: 100%; padding: 40px 4vw; display: flex; align-items: center; justify-content: space-between; gap: 32px; }
 .hero-text { max-width: 560px; }

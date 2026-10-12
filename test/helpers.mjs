@@ -51,6 +51,9 @@ export function fakeCatalog() {
       calls.push(['episodes', id, season]);
       return { season, episodes: [1, 2, 3] };
     },
+    lookup(type, id) {
+      return type === 'movie' && id === '777' ? { title: 'Do Catálogo', year: '2024', poster: '/catalogo.jpg' } : null;
+    },
   };
 }
 
