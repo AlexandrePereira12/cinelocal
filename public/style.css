@@ -61,7 +61,8 @@ button, select, input { font: inherit; color: inherit; }
 main { flex: 1; width: 100%; }
 .page { padding: 28px 4vw 48px; }
 .page h1 { margin: 0 0 20px; font-size: 26px; }
-.footer p { margin: 2px 0; }
+.footer a { text-decoration: underline; text-underline-offset: 3px; }
+.footer a:hover { color: var(--text); }
 .footer { padding: 20px 4vw; color: var(--muted); font-size: 13px; text-align: center; border-top: 1px solid #ffffff10; }
 
 /* Hero */
@@ -124,8 +125,9 @@ main { flex: 1; width: 100%; }
 .controls label { color: var(--muted); font-size: 13px; }
 .controls select { padding: 8px 12px; background: var(--surface); border: 1px solid #ffffff1a; border-radius: 8px; min-width: 120px; }
 .controls .spacer { flex: 1; }
-.controls .toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 14px; cursor: pointer; margin-right: 6px; }
-.controls .toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+.controls.series { gap: 14px; }
+.controls.series .pick { display: flex; align-items: center; gap: 8px; }
+.controls.series .step { display: flex; gap: 10px; }
 .note { margin-top: 12px; color: var(--muted); font-size: 13px; }
 
 /* Usuário e autenticação */
@@ -161,15 +163,62 @@ body.anon .nav, body.anon .search, body.anon .user { display: none; }
 .skeleton { background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: var(--radius); }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
+/* Celular: cabeçalho em 3 linhas (marca+usuário, busca, menu), player de borda a borda, alvos de toque de 44px */
 @media (max-width: 760px) {
-  .topbar { flex-wrap: wrap; gap: 10px; }
-  .nav { order: 3; flex-basis: 100%; }
-  .search { flex: 1; }
-  .search input { width: 100%; }
-  .hero { min-height: 380px; }
-  .hero-poster { display: none; }
+  html { -webkit-text-size-adjust: 100%; }
+  input, select { font-size: 16px; } /* abaixo de 16px o iOS dá zoom ao focar */
+  .btn { min-height: 44px; }
+  .btn.small { min-height: 40px; }
+
+  .topbar {
+    position: static;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "brand user" "search search" "nav nav";
+    gap: 10px 12px;
+    padding: 12px 16px;
+  }
+  .brand { grid-area: brand; }
+  .topbar .user { grid-area: user; }
+  .search { grid-area: search; }
+  .search input { width: 100%; min-height: 44px; }
+  .nav { grid-area: nav; flex: none; margin: 0 -16px; padding: 0 16px 2px; }
+  .nav a { padding: 10px 14px; }
+  .user-name { max-width: 120px; }
+
+  .page { padding: 20px 16px 40px; }
+  .page h1 { margin-bottom: 14px; font-size: 22px; }
+  .row { padding: 8px 16px; }
+  .row-scroll { margin: 0 -16px; padding: 0 16px 12px; scroll-padding: 0 16px; }
   .row-scroll .card { flex-basis: 130px; }
-  .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 18px 12px; }
+
+  .hero { min-height: 340px; }
+  .hero-body { padding: 28px 16px 44px; }
+  .hero h1 { font-size: 28px; }
+  .hero-poster { display: none; }
+  .hero-shade { background: linear-gradient(0deg, var(--bg) 0%, #0b0b10d9 45%, #0b0b1066 100%); }
+  .hero-overview { margin-bottom: 18px; font-size: 14px; }
+  .hero-dots { left: 16px; bottom: 12px; }
+
+  .watch { padding: 12px 0 32px; }
+  .watch-head { flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 12px; padding: 0 16px; }
+  .watch-head h1 { font-size: 22px; }
+  .watch-head .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 0; }
+  .watch-head .controls .btn { justify-content: center; text-align: center; }
+  .watch-head .controls .btn.primary { grid-column: 1 / -1; }
+  .player { min-height: 240px; border-radius: 0; box-shadow: none; }
+  .controls.series { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 16px; }
+  .controls.series .pick { flex-direction: column; align-items: stretch; gap: 4px; }
+  .controls.series select { width: 100%; min-width: 0; min-height: 44px; }
+  .controls.series .spacer { display: none; }
+  .controls.series .step { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .controls.series .step .btn { justify-content: center; }
+  .watch > .form-error, .watch > .note { padding: 0 16px; }
+
+  .auth-wrap { padding: 24px 16px 40px; }
+  .auth-card { padding: 22px 18px; }
+  .state { padding: 56px 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

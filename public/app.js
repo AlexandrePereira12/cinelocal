@@ -118,8 +118,6 @@ function remember(items) {
   writeStore('cine.meta', meta);
 }
 
-let blockPopups = readStore('cine.blockPopups').on !== false;
-
 function watchHref(item) {
   return `#/assistir/${item.type}/${item.id}`;
 }
@@ -325,6 +323,23 @@ function renderRegister() {
   form.elements.name.focus();
 }
 
+// Atribuição exigida pelos termos de uso do TMDB: fica numa página de créditos, fora das telas principais.
+function renderCredits() {
+  app.replaceChildren(
+    el(
+      'div',
+      { class: 'auth-wrap' },
+      el(
+        'div',
+        { class: 'auth-card' },
+        el('h1', {}, 'Créditos'),
+        el('p', { class: 'auth-hint' }, 'Dados de filmes e séries, pôsteres e imagens: TMDB. Este produto usa a API do TMDB, mas não é endossado nem certificado pelo TMDB.'),
+        el('a', { class: 'btn', href: session.token ? '#/' : '#/login' }, 'Voltar'),
+      ),
+    ),
+  );
+}
+
 async function renderDecision(token, navId) {
   app.replaceChildren(spinner());
   if (token) history.replaceState(null, '', '#/decisao'); // tira o token da barra de endereço
@@ -504,18 +519,6 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const openLink = el('a', { class: 'btn primary', target: '_blank', rel: 'noopener noreferrer' }, '▶ Assistir em nova aba');
   const reloadBtn = el('button', { class: 'btn', type: 'button', onclick: () => loadFrame() }, 'Recarregar player');
   const doneBtn = el('button', { class: 'btn', type: 'button', onclick: () => toggleDone() }, 'Marcar como assistido');
-  const popupToggle = el('input', {
-    type: 'checkbox',
-    id: 'block-popups',
-    checked: blockPopups,
-    onchange: () => {
-      blockPopups = popupToggle.checked;
-      writeStore('cine.blockPopups', { on: blockPopups });
-      loadFrame();
-    },
-  });
-  const popupLabel = el('label', { class: 'toggle', for: 'block-popups' }, popupToggle, 'Bloquear pop-ups');
-
   const page = el(
     'div',
     { class: 'watch' },
@@ -523,7 +526,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       'div',
       { class: 'watch-head' },
       el('div', {}, heading, subtitle),
-      el('div', { class: 'controls' }, popupLabel, doneBtn, openLink, reloadBtn),
+      el('div', { class: 'controls' }, openLink, doneBtn, reloadBtn),
     ),
     player,
   );
@@ -537,14 +540,11 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     page.append(
       el(
         'div',
-        { class: 'controls' },
-        el('label', { for: 'season' }, 'Temporada'),
-        seasonSelect,
-        el('label', { for: 'episode' }, 'Episódio'),
-        episodeSelect,
+        { class: 'controls series' },
+        el('div', { class: 'pick' }, el('label', { for: 'season' }, 'Temporada'), seasonSelect),
+        el('div', { class: 'pick' }, el('label', { for: 'episode' }, 'Episódio'), episodeSelect),
         el('span', { class: 'spacer' }),
-        prevBtn,
-        nextBtn,
+        el('div', { class: 'step' }, prevBtn, nextBtn),
       ),
     );
   }
@@ -553,7 +553,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     el(
       'p',
       { class: 'note' },
-      'Se o player embutido mostrar “Acesso não autorizado” (acontece em localhost ou por IP), acesse pelo endereço do site publicado ou use “Assistir em nova aba”.',
+      'Se um anúncio abrir em outra aba, feche e volte. Bloqueadores de anúncio impedem o player de tocar.',
     ),
   );
   app.replaceChildren(page);
@@ -608,8 +608,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     player.replaceChildren(
       el('iframe', {
         src: data.url,
-        // Sem allow-popups/allow-top-navigation: o player não abre abas nem redireciona a página.
-        sandbox: blockPopups ? 'allow-scripts allow-same-origin allow-forms' : null,
+        // Sem `sandbox` de propósito: o player do provedor detecta e se recusa a tocar ("remova o Sandbox").
         allowfullscreen: true,
         allow: 'autoplay; fullscreen; encrypted-media; picture-in-picture',
         title: data.title,
@@ -705,6 +704,10 @@ function route() {
   if ((match = hash.match(/^#\/decisao(?:\/([A-Za-z0-9._-]+))?$/))) {
     setActiveNav(null);
     return renderDecision(match[1], token);
+  }
+  if (hash === '#/creditos') {
+    setActiveNav(null);
+    return renderCredits();
   }
   if (hash === '#/login' || hash === '#/cadastro') {
     setActiveNav(null);
