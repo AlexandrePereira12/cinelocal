@@ -16,6 +16,8 @@
  *   projeto, mais branda que a anterior de 10 caracteres). O login não aplica a regra, para contas antigas entrarem.
  *   O domínio do e-mail precisa receber mensagens (email-domain.mjs); a consulta vem depois do limite por IP e só
  *   reprova com "sem registro" explícito do DNS. A caixa em si não é provada: a aprovação do admin cobre isso.
+ * - Transmissão para a TV (tv.mjs): pareamento por código; `/api/tv/pair` e `/api/tv/poll` são públicos (a TV não tem
+ *   login) e protegidos por segredo próprio; enviar e parar exigem login. O App ID do Chromecast vem de CAST_APP_ID.
  * - O link do e-mail usa SITE_URL (nunca o header Host, que permitiria injetar link de phishing) e abre uma
  *   página de confirmação; a decisão é um POST com token assinado (uso único: só vale com status `pending`).
  * - POST só com application/json e corpo pequeno; sem CORS (mesma origem); respostas `no-store`.
@@ -28,9 +30,10 @@
  */
 
 import { burnPasswordCheck, hashPassword, readSecret, sha256Hex, signToken, verifyPassword, verifyToken } from './auth.mjs';
-import { EMBED_BASE } from './catalog.mjs';
+import { embedUrl } from './catalog.mjs';
 import { HttpError } from './errors.mjs';
 import { clear, increment, isBlocked } from './limits.mjs';
+import { createTv, normalizeCode } from './tv.mjs';
 import * as v from './validate.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -68,6 +71,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
   const nowSeconds = () => Math.floor(now() / 1000);
   const nowIso = () => new Date(now()).toISOString();
   const userId = (email) => `u_${sha256Hex(email).slice(0, 40)}`;
+  const tv = createTv({ stores, now });
 
   function secret() {
     const value = readSecret(env);
@@ -333,8 +337,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       return next;
     });
 
-    const url = type === 'tv' ? `${EMBED_BASE}/${mediaId}/${item.season}/${item.episode}` : `${EMBED_BASE}/${mediaId}`;
-    return json(200, { url, ...publicItem(item) });
+    return json(200, { url: embedUrl(type, mediaId, item.season, item.episode), ...publicItem(item) });
   }
 
   async function markDone(req, { id: uid }) {
@@ -407,6 +410,40 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return json(200, { rows });
   }
 
+  // --- transmitir para a TV (ver tv.mjs) ---
+
+  const tvPair = async (_req, ip) => json(200, await tv.pair(ip));
+
+  async function tvPoll(req) {
+    const body = await readJson(req);
+    return json(200, await tv.poll({ code: normalizeCode(body.code), secret: typeof body.secret === 'string' ? body.secret : '' }));
+  }
+
+  // Só type/id/season/episode entram: o link do player é sempre montado aqui, e o histórico não é tocado
+  // (o celular já registrou o título ao abrir o filme).
+  async function tvSend(req, { id: uid }) {
+    const body = await readJson(req);
+    const type = v.validType(body.type);
+    const mediaId = v.validId(body.id);
+    const season = body.season == null ? 1 : v.intInRange(body.season, 0, 99);
+    const episode = body.episode == null ? 1 : v.intInRange(body.episode, 1, 999);
+    if (!type || !mediaId || season === null || episode === null) throw v.badRequest();
+
+    const title = catalog.lookup(type, mediaId)?.title ?? null;
+    const play = { url: embedUrl(type, mediaId, season, episode), title, season: type === 'tv' ? season : null, episode: type === 'tv' ? episode : null };
+    await tv.send(uid, { code: normalizeCode(body.code), play });
+    return json(200, { ok: true, title });
+  }
+
+  async function tvStop(req, { id: uid }) {
+    const body = await readJson(req);
+    await tv.stop(uid, { code: normalizeCode(body.code) });
+    return json(200, { ok: true });
+  }
+
+  // O App ID do receptor do Chromecast (8 caracteres hexadecimais, público) vem do ambiente; sem ele a opção some.
+  const castAppId = () => (/^[0-9A-F]{8}$/i.test(env.CAST_APP_ID ?? '') ? env.CAST_APP_ID.toUpperCase() : null);
+
   // --- roteamento ---
 
   const PROTECTED = [
@@ -439,6 +476,9 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       async (_req, _url, m) => json(200, await catalog.episodes(m[1], Number(m[2]))),
     ],
     ['POST', /^\/api\/play$/, (req, _url, _m, session) => play(req, session)],
+    ['POST', /^\/api\/tv\/send$/, (req, _url, _m, session) => tvSend(req, session)],
+    ['POST', /^\/api\/tv\/stop$/, (req, _url, _m, session) => tvStop(req, session)],
+    ['GET', /^\/api\/cast\/config$/, async () => json(200, { appId: castAppId() })],
     ['POST', /^\/api\/me\/done$/, (req, _url, _m, session) => markDone(req, session)],
     ['GET', /^\/api\/me\/library$/, (_req, _url, _m, session) => library(session)],
   ];
@@ -446,6 +486,8 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
   const PUBLIC = [
     ['POST', '/api/auth/register', register],
     ['POST', '/api/auth/login', login],
+    ['POST', '/api/tv/pair', tvPair],
+    ['POST', '/api/tv/poll', tvPoll],
     ['POST', '/api/auth/decision/preview', decisionPreview],
     ['POST', '/api/auth/decision', decisionApply],
   ];

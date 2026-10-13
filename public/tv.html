@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#0b0b10">
+  <title>Cine Local na TV</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="tv.css">
+</head>
+<body class="tv">
+  <main class="tv-wait" id="wait">
+    <p class="tv-brand">Cine<span>Local</span></p>
+    <h1 class="tv-title">Transmitir para esta TV</h1>
+    <p class="tv-code" id="code" aria-live="polite" aria-label="Código desta TV">······</p>
+    <ol class="tv-steps">
+      <li>No celular ou no computador, abra o Cine Local e entre na sua conta.</li>
+      <li>Escolha um filme ou série e toque em <strong>Transmitir para a TV</strong>.</li>
+      <li>Digite o código acima e toque em <strong>Enviar para a TV</strong>.</li>
+    </ol>
+    <p class="tv-address" id="address"></p>
+    <p class="tv-status" id="status" role="status">Gerando o código…</p>
+  </main>
+  <div class="tv-stage" id="stage" hidden>
+    <div class="tv-player" id="player"></div>
+    <p class="tv-now" id="now" hidden></p>
+  </div>
+  <script src="tv-player.js"></script>
+  <script src="tv.js"></script>
+</body>
+</html>

@@ -980,9 +980,17 @@ async function renderLibrary(token) {
 }
 
 // --- transmitir para a TV ---
-// O player é um iframe de outro site: a página não enxerga o <video> nem a URL do vídeo, então não há como usar
-// o Google Cast SDK nem a Remote Playback API. A transmissão é feita pelo espelhamento do navegador/aparelho
-// (Chromecast pelo Chrome/Edge, AirPlay, Smart View, HDMI), e aqui só se guia a pessoa até lá.
+// Três caminhos, do mais direto ao mais manual:
+//  1. Chromecast (Google Cast): o site manda o endereço do player para uma página nossa (receiver.html) que roda no
+//     Chromecast e abre o player na TV. Só aparece com CAST_APP_ID configurado e num navegador com Cast (Chrome).
+//  2. Código da TV: a TV abre /tv e mostra um código; aqui a pessoa digita e o servidor entrega à TV (tv.mjs).
+//  3. Espelhamento: passo a passo para espelhar a tela (Chromecast pelo Chrome, AirPlay, Miracast, HDMI).
+// O player é um iframe de outro site: não há acesso ao <video> nem ao endereço do vídeo. Por isso os caminhos 1 e 2
+// mandam a TV abrir o MESMO player (não o vídeo) e nenhum deles controla o player depois de aberto.
+
+const CAST_NAMESPACE = 'urn:x-cast:com.cinelocal.tv'; // igual ao de receiver.js
+const CAST_SDK_URL = 'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1';
+const TV_CODE_KEY = 'cine.tvcode';
 
 const CAST_GUIDES = [
   {
@@ -1017,11 +1025,10 @@ const CAST_GUIDES = [
   },
   {
     id: 'other',
-    title: 'Outras formas (cabo HDMI, Miracast e navegador da TV)',
+    title: 'Outras formas (cabo HDMI e Miracast)',
     steps: [
       'Cabo HDMI: ligue o computador ou o celular (com adaptador) à TV e escolha a entrada HDMI. É a opção mais estável.',
       'Windows: tecle Windows + K para transmitir a tela para uma TV com Miracast.',
-      'Smart TV com navegador: abra o navegador da TV, digite o endereço abaixo, entre na sua conta e abra o filme.',
     ],
   },
 ];
@@ -1034,32 +1041,213 @@ function castGuideFor() {
   return platform === 'android' ? 'android' : 'chrome';
 }
 
-function openCastDialog() {
-  const address = location.href;
-  const copyLabel = 'Copiar link';
-  const link = el('input', { class: 'cast-link', type: 'text', readonly: true, value: address, 'aria-label': 'Endereço deste filme' });
-  const copy = el('button', { class: 'btn small', type: 'button' }, copyLabel);
-  copy.addEventListener('click', async () => {
+// ---- código da TV ----
+
+function readTvCode() {
+  try {
+    return localStorage.getItem(TV_CODE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveTvCode(code) {
+  try {
+    localStorage.setItem(TV_CODE_KEY, code);
+  } catch {
+    /* sem storage: a pessoa digita de novo na próxima vez */
+  }
+}
+
+const normalizeTvCode = (value) => value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+const formatTvCode = (code) => (code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code);
+
+function sendToTv(code, target) {
+  return api('tv/send', { method: 'POST', body: { code, type: target.type, id: target.id, season: target.season ?? undefined, episode: target.episode ?? undefined } });
+}
+
+function codeOption(cast) {
+  const input = el('input', { class: 'cast-code', type: 'text', maxlength: '7', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', placeholder: 'ABC 123', 'aria-label': 'Código mostrado na TV', value: formatTvCode(readTvCode()) });
+  const info = el('p', { class: 'cast-info', role: 'status' });
+  const send = el('button', { class: 'btn primary small', type: 'button' }, 'Enviar para a TV');
+  const stop = el('button', { class: 'btn small', type: 'button', hidden: !cast.tvCode }, 'Parar na TV');
+
+  const say = (text, bad = false) => {
+    info.textContent = text;
+    info.classList.toggle('bad', bad);
+  };
+
+  send.addEventListener('click', async () => {
+    const code = normalizeTvCode(input.value);
+    if (code.length !== 6) return say('Digite os 6 caracteres que aparecem na TV.', true);
+    send.disabled = true;
     try {
-      await navigator.clipboard.writeText(address);
-      copy.textContent = 'Copiado!';
-    } catch {
-      link.select();
-      copy.textContent = 'Copie com Ctrl+C';
+      await sendToTv(code, cast.target());
+      saveTvCode(code);
+      cast.tvCode = code;
+      input.value = formatTvCode(code);
+      stop.hidden = false;
+      say('Enviado! O player abre na TV em até 5 segundos. Se trocar de episódio aqui, a TV acompanha.');
+    } catch (err) {
+      say(err.message, true);
+    } finally {
+      send.disabled = false;
     }
-    setTimeout(() => {
-      copy.textContent = copyLabel;
-    }, 2500);
   });
 
-  const preferred = castGuideFor();
-  showDialog(
-    'Transmitir para a TV',
-    el('p', { class: 'modal-intro' }, 'O filme toca num player de outro site dentro do Cine Local, então a transmissão é feita pelo espelhamento do seu navegador ou aparelho, e não por um botão dentro do player. Funciona na mesma rede Wi-Fi da TV.'),
-    ...CAST_GUIDES.map((guide) => guideDetails(guide, guide.id === preferred)),
-    el('p', { class: 'modal-tip' }, 'Tela preta ou sem som? Alguns players bloqueiam o espelhamento da aba. No Chrome, em “Fontes”, escolha “Transmitir tela” em vez de “Transmitir guia”.'),
-    el('div', { class: 'cast-link-row' }, link, copy),
+  stop.addEventListener('click', async () => {
+    try {
+      await api('tv/stop', { method: 'POST', body: { code: cast.tvCode } });
+      cast.tvCode = null;
+      stop.hidden = true;
+      say('Transmissão encerrada. A TV volta para a tela do código.');
+    } catch (err) {
+      say(err.message, true);
+    }
+  });
+
+  return el(
+    'section',
+    { class: 'cast-option' },
+    el('h3', {}, 'TV com navegador (código)'),
+    el('p', {}, `Na TV, abra o navegador e entre em ${location.host}/tv. Digite aqui o código que aparecer.`),
+    el('div', { class: 'cast-row' }, input, send, stop),
+    info,
   );
+}
+
+// ---- Chromecast (Google Cast) ----
+
+let castSdkLoad = null;
+let castAppIdLoad = null;
+let castReady = false;
+let castNotify = null; // quem está ouvindo as respostas do receptor (o painel aberto)
+
+function loadCastSdk() {
+  castSdkLoad ??= new Promise((resolve) => {
+    window.__onGCastApiAvailable = (available) => resolve(Boolean(available) && Boolean(window.cast?.framework));
+    const script = el('script', { src: CAST_SDK_URL, async: true });
+    script.addEventListener('error', () => resolve(false));
+    document.head.append(script);
+    setTimeout(() => resolve(false), 10000);
+  });
+  return castSdkLoad;
+}
+
+// null quando a opção não está disponível aqui (sem App ID configurado ou navegador sem Cast).
+async function castContext() {
+  castAppIdLoad ??= api('cast/config').then((config) => config.appId, () => null);
+  const appId = await castAppIdLoad;
+  if (!appId || !(await loadCastSdk())) return null;
+  const context = cast.framework.CastContext.getInstance();
+  if (!castReady) {
+    context.setOptions({ receiverApplicationId: appId, autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED });
+    castReady = true;
+  }
+  return context;
+}
+
+async function sendToChromecast(context, target) {
+  const session = context.getCurrentSession();
+  if (!session) throw new Error('Nenhum Chromecast conectado.');
+  await session.sendMessage(CAST_NAMESPACE, { type: 'play', url: target.url, title: target.title, season: target.season, episode: target.episode });
+}
+
+function chromecastOption(cast) {
+  const info = el('p', { class: 'cast-info', role: 'status' });
+  const actions = el('div', { class: 'cast-row' });
+  const root = el('section', { class: 'cast-option', hidden: true }, el('h3', {}, 'Chromecast'), el('p', {}, 'Para um Chromecast ou TV com Chromecast na mesma rede Wi-Fi. A TV abre o mesmo player do filme.'), actions, info);
+  const say = (text, bad = false) => {
+    info.textContent = text;
+    info.classList.toggle('bad', bad);
+  };
+
+  castContext().then((context) => {
+    if (!context) return;
+    root.hidden = false;
+
+    const listened = new WeakSet();
+    const listen = (session) => session.addMessageListener(CAST_NAMESPACE, (_namespace, raw) => castNotify?.(typeof raw === 'string' ? JSON.parse(raw) : raw));
+    const paint = () => {
+      const session = context.getCurrentSession();
+      if (!session) {
+        actions.replaceChildren(el('button', { class: 'btn primary small', type: 'button', onclick: connect }, 'Escolher Chromecast'));
+        return;
+      }
+      if (!listened.has(session)) {
+        listened.add(session);
+        listen(session);
+      }
+      say(`Conectado a ${session.getCastDevice().friendlyName}.`);
+      actions.replaceChildren(
+        el('button', { class: 'btn primary small', type: 'button', onclick: resend }, 'Enviar este título'),
+        el('button', { class: 'btn small', type: 'button', onclick: disconnect }, 'Parar'),
+      );
+    };
+
+    async function resend() {
+      try {
+        await sendToChromecast(context, cast.target());
+        cast.chromecast = true;
+        say(`Enviado para ${context.getCurrentSession().getCastDevice().friendlyName}. Se o player não abrir na TV, ele pode estar pedindo um clique que o controle não faz.`);
+      } catch (err) {
+        say(err.message, true);
+      }
+    }
+
+    async function connect() {
+      const error = await context.requestSession();
+      if (typeof error === 'string') {
+        if (error !== 'cancel') say(`Não foi possível conectar ao Chromecast (${error}).`, true);
+        return;
+      }
+      paint();
+      await resend();
+    }
+
+    function disconnect() {
+      context.endCurrentSession(true);
+      cast.chromecast = false;
+      say('Transmissão encerrada.');
+      paint();
+    }
+
+    castNotify = (message) => {
+      if (message?.type === 'ack' && message.ok === false) say(`A TV recusou o envio (${message.reason}).`, true);
+      else if (message?.type === 'ack') say('A TV abriu o player.');
+    };
+    paint();
+  });
+  return root;
+}
+
+// Se a pessoa trocar de episódio com a transmissão ativa, a TV acompanha (só dentro da mesma tela do filme).
+function followCast(cast) {
+  if (cast.tvCode) sendToTv(cast.tvCode, cast.target()).catch(() => (cast.tvCode = null));
+  if (cast.chromecast) {
+    castContext()
+      .then((context) => context && sendToChromecast(context, cast.target()))
+      .catch(() => (cast.chromecast = false));
+  }
+}
+
+function openCastDialog(cast) {
+  const preferred = castGuideFor();
+  const dialog = showDialog(
+    'Transmitir para a TV',
+    el('p', { class: 'modal-intro' }, 'O filme toca num player de outro site, então a TV abre o mesmo player. Daqui você troca de episódio e para a transmissão; pausar e avançar dependem do player que abrir na TV.'),
+    chromecastOption(cast),
+    codeOption(cast),
+    el(
+      'details',
+      { class: 'guide' },
+      el('summary', {}, 'Espelhar a tela (sem Chromecast e sem código)'),
+      el('div', { class: 'guide-nested' }, ...CAST_GUIDES.map((guide) => guideDetails(guide, guide.id === preferred)), el('p', { class: 'modal-tip' }, 'Tela preta ou sem som? Alguns players bloqueiam o espelhamento da aba. No Chrome, em “Fontes”, escolha “Transmitir tela” em vez de “Transmitir guia”.')),
+    ),
+  );
+  dialog.addEventListener('close', () => {
+    castNotify = null;
+  });
 }
 
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
@@ -1072,8 +1260,11 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     seasons: [],
     episodes: [],
     done: false,
+    url: null,
   };
   let frameRequest = 0;
+  // Estado da transmissão desta tela: com ela ativa, trocar de episódio manda o novo para a TV (followCast).
+  const cast = { tvCode: null, chromecast: false, target: () => ({ type, id, season: state.season, episode: state.episode, title: state.title, url: state.url }) };
 
   const heading = el('h1', {}, state.title);
   const subtitle = el('p', { class: 'sub' });
@@ -1081,7 +1272,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const message = el('p', { class: 'form-error', role: 'alert' });
 
   const openLink = el('a', { class: 'btn primary', target: '_blank', rel: 'noopener noreferrer' }, '▶ Assistir em nova aba');
-  const castBtn = el('button', { class: 'btn', type: 'button', onclick: openCastDialog }, icon('tv'), 'Transmitir para a TV');
+  const castBtn = el('button', { class: 'btn', type: 'button', onclick: () => openCastDialog(cast) }, icon('tv'), 'Transmitir para a TV');
   const reloadBtn = el('button', { class: 'btn', type: 'button', onclick: () => loadFrame() }, 'Recarregar player');
   const doneBtn = el('button', { class: 'btn', type: 'button', onclick: () => toggleDone() }, 'Marcar como assistido');
   const page = el(
@@ -1170,6 +1361,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     subtitle.textContent = [data.year, isTv && `Temporada ${data.season} · Episódio ${data.episode}`].filter(Boolean).join(' · ');
     document.title = `${data.title} — Cine Local`;
     openLink.href = data.url;
+    state.url = data.url;
     player.replaceChildren(
       el('iframe', {
         src: data.url,
@@ -1181,6 +1373,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     );
     if (isTv) history.replaceState(null, '', `#/assistir/tv/${id}/${data.season}/${data.episode}`);
     refreshControls();
+    followCast(cast);
   }
 
   async function toggleDone() {

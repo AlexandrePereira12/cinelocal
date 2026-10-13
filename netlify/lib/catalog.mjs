@@ -23,6 +23,11 @@ import { HttpError } from './errors.mjs';
 
 export const EMBED_BASE = 'https://embedplayapi.top/embed';
 
+// Link do player do provedor. Só o servidor monta: o navegador (ou a TV) nunca manda uma URL pronta.
+export function embedUrl(type, mediaId, season, episode) {
+  return type === 'tv' ? `${EMBED_BASE}/${mediaId}/${season}/${episode}` : `${EMBED_BASE}/${mediaId}`;
+}
+
 const PAGE_SIZE = 30;
 const TRENDING_CAP = 60;
 const TOP_MIN_VOTES = 500;
