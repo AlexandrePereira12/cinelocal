@@ -19,11 +19,63 @@ test('o receptor desliga o timeout de inatividade e só abre o player pelo TvPla
   assert.ok(!/createElement\('iframe'\)/.test(receiver), 'o iframe é criado só em tv-player.js, que valida o endereço');
 });
 
-test('tv-player.js só aceita o player do provedor (origem e caminho)', async () => {
-  const player = await text('public/tv-player.js');
-  assert.match(player, /EMBED_ORIGIN = 'https:\/\/embedplayapi\.top'/);
-  assert.match(player, /url\.origin === EMBED_ORIGIN/);
-  assert.match(player, /indexOf\('\/embed\/'\) === 0/);
+test('tv-player.js só aceita o player do provedor (comportamento da expressão regular)', async () => {
+  const source = await text('public/tv-player.js');
+  const literal = source.match(/var EMBED_URL = (\/.+\/);/)[1];
+  const accepts = new Function(`return ${literal}`)();
+
+  for (const good of ['https://embedplayapi.top/embed/603', 'https://embedplayapi.top/embed/1396/2/3', 'https://embedplayapi.top/embed/1396/10/120']) {
+    assert.ok(accepts.test(good), good);
+  }
+  for (const bad of [
+    'http://embedplayapi.top/embed/603',
+    'https://malicioso.example/embed/603',
+    'https://embedplayapi.top.malicioso.example/embed/603',
+    'https://embedplayapi.top@malicioso.example/embed/603',
+    'https://embedplayapi.top:444/embed/603',
+    'https://embedplayapi.top/outra/603',
+    'https://embedplayapi.top/embed/603/../../x',
+    'https://embedplayapi.top/embed/603?x=1',
+    'https://embedplayapi.top/embed/abc',
+    'https://embedplayapi.top/embed/603\nhttps://malicioso.example',
+    'javascript:alert(1)',
+    '',
+  ]) {
+    assert.ok(!accepts.test(bad), `deveria recusar: ${JSON.stringify(bad)}`);
+  }
+});
+
+test('os scripts da TV são ES5 puro: TV antiga não roda async/await, fetch, setas, const/let nem template string', async () => {
+  const forbidden = [
+    [/\basync\b/, 'async'],
+    [/\bawait\b/, 'await'],
+    [/=>/, 'seta'],
+    [/\b(const|let)\s/, 'const/let'],
+    [/\bclass\s+\w/, 'class'],
+    [/\?\.[A-Za-z_$(\[]/, 'encadeamento opcional'],
+    [/\?\?/, 'coalescência nula'],
+    [/`/, 'template string'],
+    [/\bfetch\s*\(/, 'fetch'],
+    [/\bnew\s+URL\b/, 'new URL'],
+    [/\bPromise\b/, 'Promise'],
+    [/\.\.\.[A-Za-z_$(\[]/, 'spread'],
+    [/\bfor\s*\([^)]*\sof\s/, 'for..of'],
+    [/\.(includes|startsWith|endsWith|padStart|find|findIndex)\(/, 'método ES6+ de Array/String'],
+    [/\.replaceChildren\(|\.classList\b|Object\.(entries|values|assign)\(/, 'API moderna do DOM/Object'],
+  ];
+  for (const file of ['public/tv.js', 'public/tv-player.js', 'public/receiver.js']) {
+    // comentários podem citar esses termos; só o código conta
+    const code = (await text(file)).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const [pattern, name] of forbidden) assert.ok(!pattern.test(code), `${file} usa ${name}`);
+  }
+});
+
+test('tv.html mostra um aviso de diagnóstico se o script não rodar e não depende do style.css (usa variáveis CSS)', async () => {
+  const html = await text('public/tv.html');
+  assert.match(html, /Se esta mensagem não mudar, o navegador desta TV não conseguiu abrir a página/);
+  assert.ok(!html.includes('style.css'));
+  const css = (await text('public/tv.css')).replace(/\/\*[\s\S]*?\*\//g, ''); // o comentário cita os termos
+  assert.ok(!/var\(--/.test(css) && !/display:\s*grid/.test(css) && !/\binset\b/.test(css) && !/clamp\(/.test(css), 'tv.css não pode usar recursos que TV antiga ignora');
 });
 
 test('as páginas da TV não têm script nem estilo inline (a CSP bloquearia) e carregam tv-player antes dos outros', async () => {

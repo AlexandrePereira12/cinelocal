@@ -7,11 +7,10 @@
   <meta name="theme-color" content="#0b0b10">
   <title>Cine Local na TV</title>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="tv.css">
 </head>
 <body class="tv">
-  <main class="tv-wait" id="wait">
+  <main class="tv-wait" id="wait"><div class="tv-wait-inner">
     <p class="tv-brand">Cine<span>Local</span></p>
     <h1 class="tv-title">Transmitir para esta TV</h1>
     <p class="tv-code" id="code" aria-live="polite" aria-label="Código desta TV">······</p>
@@ -21,8 +20,8 @@
       <li>Digite o código acima e toque em <strong>Enviar para a TV</strong>.</li>
     </ol>
     <p class="tv-address" id="address"></p>
-    <p class="tv-status" id="status" role="status">Gerando o código…</p>
-  </main>
+    <p class="tv-status warn" id="status" role="status">Carregando… Se esta mensagem não mudar, o navegador desta TV não conseguiu abrir a página.</p>
+  </div></main>
   <div class="tv-stage" id="stage" hidden>
     <div class="tv-player" id="player"></div>
     <p class="tv-now" id="now" hidden></p>

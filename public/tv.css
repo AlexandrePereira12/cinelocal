@@ -1,19 +1,25 @@
-/* Página que roda no navegador da TV: texto grande, alto contraste e nada que dependa de mouse */
-body.tv { display: block; min-height: 100vh; overflow: hidden; font-size: clamp(18px, 1.6vw, 30px); }
-.tv-wait { display: grid; align-content: center; justify-items: center; gap: 1.2em; min-height: 100vh; padding: 4vh 6vw; text-align: center; background: radial-gradient(60% 70% at 50% 0%, #e5091433, transparent 70%), var(--bg); }
-.tv-wait[hidden], .tv-stage[hidden], .tv-now[hidden] { display: none; }
-.tv-brand { margin: 0; font-size: 1.6em; font-weight: 800; letter-spacing: -.02em; }
-.tv-brand span { color: var(--accent); }
-.tv-title { margin: 0; font-size: 1.3em; font-weight: 600; color: var(--muted); }
-.tv-code { margin: .1em 0; padding: .15em .5em; font-size: 4.6em; font-weight: 800; letter-spacing: .12em; text-indent: .12em; font-variant-numeric: tabular-nums; background: var(--surface); border: 2px solid #ffffff1f; border-radius: .25em; box-shadow: 0 20px 60px #000a; }
-.tv-steps { display: grid; gap: .6em; max-width: 34em; margin: 0; padding-left: 1.4em; color: #d6d6e0; text-align: left; }
-.tv-steps li::marker { color: var(--accent); font-weight: 700; }
-.tv-steps strong { color: var(--text); }
-.tv-address { margin: 0; color: var(--muted); font-size: .9em; }
-.tv-status { margin: 0; min-height: 1.4em; color: var(--ok); }
-.tv-status.warn { color: var(--amber); }
-.tv-stage { position: fixed; inset: 0; background: #000; }
-.tv-player, .tv-player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-.tv-now { position: absolute; top: 3vh; left: 3vw; z-index: 2; max-width: 60vw; margin: 0; padding: .4em .9em; font-weight: 600; background: #000b; border-radius: .5em; animation: tv-fade 6s ease forwards; pointer-events: none; }
-@keyframes tv-fade { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .tv-now { animation: none; } }
+/*
+ * Páginas que rodam na TV (tv.html e receiver.html). Sem variáveis CSS, grid, inset ou clamp: navegador de TV velho
+ * ignora essas regras e a tela fica ilegível. Layout em bloco/tabela, cores literais e tamanhos com valor fixo antes
+ * do relativo (o navegador antigo fica com o fixo).
+ */
+html, body.tv { margin: 0; padding: 0; background: #0b0b10; color: #f2f2f5; }
+body.tv { overflow: hidden; font-family: Arial, Helvetica, sans-serif; font-size: 24px; font-size: 1.7vw; line-height: 1.4; }
+[hidden] { display: none !important; }
+
+.tv-wait { display: table; width: 100%; height: 100%; min-height: 100vh; box-sizing: border-box; padding: 4vh 6vw; text-align: center; }
+.tv-wait-inner { display: table-cell; vertical-align: middle; }
+.tv-brand { margin: 0 0 .4em; font-size: 1.6em; font-weight: bold; }
+.tv-brand span { color: #e50914; }
+.tv-title { margin: 0 0 .6em; font-size: 1.3em; font-weight: normal; color: #9b9bab; }
+.tv-code { display: inline-block; margin: .2em 0 .6em; padding: .15em .5em; font-size: 72px; font-size: 4.6em; font-weight: bold; letter-spacing: .12em; background: #16161e; border: 2px solid #3a3a45; border-radius: 14px; }
+.tv-steps { display: inline-block; max-width: 34em; margin: 0 0 .6em; padding-left: 1.4em; text-align: left; color: #d6d6e0; }
+.tv-steps li { margin: .5em 0; }
+.tv-steps strong { color: #f2f2f5; }
+.tv-address { margin: 0 0 .4em; color: #9b9bab; font-size: .9em; }
+.tv-status { margin: 0; min-height: 1.4em; color: #8fd19e; }
+.tv-status.warn { color: #f5c518; }
+
+.tv-stage { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: #000; }
+.tv-player, .tv-player iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+.tv-now { position: absolute; top: 3vh; left: 3vw; z-index: 2; max-width: 60vw; margin: 0; padding: .4em .9em; font-weight: bold; background: #000; background: rgba(0, 0, 0, .75); border-radius: 8px; }
