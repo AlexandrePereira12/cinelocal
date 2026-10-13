@@ -7,10 +7,18 @@
 
 # Headers valem para os arquivos estáticos. O embed valida o domínio por document.referrer,
 # então o Referrer-Policy NÃO pode ser no-referrer.
+# Google Cast (Chromecast): cada origem de script/connect abaixo foi pedida pelo console quando o SDK/framework REAL
+# rodou sob esta CSP (Chrome 154 com interface).
+#   - www.gstatic.com: SDK do remetente (app.js) e framework do receptor (receiver.html).
+#   - ajax.googleapis.com: o framework do receptor carrega o Shaka Player.
+#   - ws://localhost:8008: canal do receptor com o próprio Chromecast (/v2/ipc). Sem ele o receptor quebra NA TV, sem aviso.
+# As versões http:// existem porque o SDK monta as URLs com o protocolo da página (http://localhost no netlify dev);
+# em produção (https) o navegador já bloqueia http. A CSP é uma só para o site todo: um segundo header em
+# /receiver.html não afrouxaria nada (CSPs se somam como interseção).
 [[headers]]
   for = "/*"
   [headers.values]
-    Content-Security-Policy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://image.tmdb.org; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src https://embedplayapi.top; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    Content-Security-Policy = "default-src 'none'; script-src 'self' https://www.gstatic.com http://www.gstatic.com https://ajax.googleapis.com http://ajax.googleapis.com; style-src 'self'; img-src 'self' data: https://image.tmdb.org; connect-src 'self' ws://localhost:8008; manifest-src 'self'; worker-src 'self'; frame-src https://embedplayapi.top; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     X-Content-Type-Options = "nosniff"
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"

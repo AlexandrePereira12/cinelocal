@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Cine Local</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="tv.css">
+</head>
+<body class="tv">
+  <main class="tv-wait" id="wait">
+    <p class="tv-brand">Cine<span>Local</span></p>
+    <h1 class="tv-title">Conectado ao Cine Local</h1>
+    <p class="tv-status" id="status" role="status">Escolha um filme no celular e envie para esta TV.</p>
+  </main>
+  <div class="tv-stage" id="stage" hidden>
+    <div class="tv-player" id="player"></div>
+    <p class="tv-now" id="now" hidden></p>
+  </div>
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script src="tv-player.js"></script>
+  <script src="receiver.js"></script>
+</body>
+</html>

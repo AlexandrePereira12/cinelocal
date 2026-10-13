@@ -70,7 +70,7 @@ export function fakeCatalog({ withGenres = true } = {}) {
 }
 
 export function makeApp({ env: envOverrides = {}, mailFails = false, genres = true } = {}) {
-  const stores = { users: memoryStore(), library: memoryStore(), limits: memoryStore() };
+  const stores = { users: memoryStore(), library: memoryStore(), limits: memoryStore(), tv: memoryStore() };
   const catalog = fakeCatalog({ withGenres: genres });
   const mails = [];
   const mailer = {
