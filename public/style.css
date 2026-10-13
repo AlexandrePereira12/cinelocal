@@ -137,11 +137,15 @@ main { flex: 1; width: 100%; }
 .note { margin-top: 12px; color: var(--muted); font-size: 13px; }
 
 /* Usuário e autenticação */
-body.anon .nav, body.anon .search, body.anon .user { display: none; }
+body.anon .nav, body.anon .search, body.anon .user-name, body.anon #logout { display: none; }
 body.onboarding .nav, body.onboarding .search { display: none; }
-.topbar .user { display: flex; align-items: center; gap: 10px; }
+.topbar .user { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .user-name { color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.btn.small { padding: 6px 14px; font-size: 14px; }
+.btn.small { flex: none; padding: 6px 14px; font-size: 14px; }
+.install-app { display: grid; place-items: center; flex: none; width: 38px; height: 38px; padding: 0; background: none; cursor: pointer; border: 1px solid #ffffff1a; border-radius: 50%; color: var(--muted); transition: color .15s, border-color .15s, background .15s; }
+.install-app[hidden] { display: none; }
+.install-app:hover { color: var(--text); border-color: var(--accent); background: #e5091422; }
+.install-app:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn.danger { background: #8a1c24; color: #fff; }
 .btn.danger:hover { background: #a82630; }
 .btn { text-decoration: none; }
@@ -233,6 +237,35 @@ main:has(> .auth-stage) { display: flex; }
 .section-title { margin: 28px 0 14px; font-size: 20px; }
 .empty { color: var(--muted); }
 
+.guide { background: var(--surface); border: 1px solid #ffffff12; border-radius: 12px; }
+.guide summary { padding: 14px 16px; font-weight: 600; cursor: pointer; border-radius: 12px; }
+.guide summary:hover { background: #ffffff08; }
+.guide summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.guide[open] summary { border-bottom: 1px solid #ffffff12; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.guide ol { display: grid; gap: 10px; margin: 0; padding: 14px 16px 14px 40px; color: #d6d6e0; }
+.guide-note { margin: 0; padding: 14px 16px; color: var(--muted); font-size: 14px; }
+.guide ol + .guide-note { padding-top: 0; }
+
+/* Janelas modais: instalar o app e transmitir para a TV */
+body:has(.modal[open]) { overflow: hidden; }
+.modal { width: calc(100% - 32px); max-width: 600px; max-height: calc(100dvh - 32px); padding: 0; overflow: auto; color: var(--text); background: var(--surface); border: 1px solid #ffffff1a; border-radius: 16px; box-shadow: 0 24px 60px #000b; }
+.modal::backdrop { background: #000a; backdrop-filter: blur(4px); }
+.modal-body { display: grid; gap: 14px; padding: 20px; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.modal-head h2 { margin: 0; font-size: 20px; }
+.modal-close { display: grid; place-items: center; flex: none; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
+.modal-close:hover { color: var(--text); background: #ffffff12; }
+.modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.modal-intro, .modal-tip { margin: 0; color: var(--muted); font-size: 14px; }
+.modal-tip { padding: 12px 14px; background: var(--bg); border: 1px solid #ffffff12; border-radius: 10px; }
+.modal-subtitle { margin: 4px 0 0; font-size: 15px; }
+.modal-steps { display: grid; gap: 10px; margin: 0; padding-left: 22px; color: #d6d6e0; }
+.modal-steps li::marker { color: var(--accent); font-weight: 700; }
+.modal-note { margin: 0; color: var(--muted); font-size: 14px; }
+.cast-link-row { display: flex; gap: 8px; }
+.cast-link { flex: 1; min-width: 0; padding: 9px 12px; background: var(--bg); border: 1px solid #ffffff1a; border-radius: 8px; color: var(--muted); font-size: 13px; }
+.cast-link:focus { outline: none; border-color: var(--accent); color: var(--text); }
+
 /* Gêneros favoritos */
 .genre-bar { margin: 14px 4vw 0; color: var(--muted); font-size: 14px; }
 .genre-bar strong { color: var(--text); font-weight: 600; }
@@ -263,18 +296,24 @@ main:has(> .auth-stage) { display: flex; }
   .topbar {
     position: static;
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr); /* minmax(0, ...) deixa o nome do usuário encolher em vez de estourar a tela */
     grid-template-areas: "brand user" "search search" "nav nav";
     gap: 10px 12px;
     padding: 12px 16px;
   }
   .brand { grid-area: brand; }
-  .topbar .user { grid-area: user; }
+  .topbar .user { grid-area: user; justify-self: end; max-width: 100%; }
   .search { grid-area: search; }
   .search input { width: 100%; min-height: 44px; }
   .nav { grid-area: nav; flex: none; margin: 0 -16px; padding: 0 16px 2px; }
   .nav a { padding: 10px 14px; }
   .user-name { max-width: 120px; }
+  .install-app { width: 44px; height: 44px; }
+
+  .modal-body { padding: 16px; }
+  .cast-link-row { flex-direction: column; }
+  .cast-link-row .btn { justify-content: center; }
+
 
   .page { padding: 20px 16px 40px; }
   .genre-bar { margin: 14px 16px 0; }
@@ -299,7 +338,7 @@ main:has(> .auth-stage) { display: flex; }
   .watch-head .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 0; }
   .watch-head .controls .btn { justify-content: center; text-align: center; }
   .watch-head .controls .btn.primary { grid-column: 1 / -1; }
-  .player { min-height: 240px; border-radius: 0; box-shadow: none; }
+  .player { aspect-ratio: auto; height: max(240px, 56.25vw); border-radius: 0; box-shadow: none; } /* 16:9 com piso de 240px; min-height + aspect-ratio viravam largura (240 * 16/9) e estouravam telas de 390px */
   .controls.series { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 16px; }
   .controls.series .pick { flex-direction: column; align-items: stretch; gap: 4px; }
   .controls.series select { width: 100%; min-width: 0; min-height: 44px; }
