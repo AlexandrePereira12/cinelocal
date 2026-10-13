@@ -10,17 +10,18 @@ function movie(i, t, extra = {}) {
 
 const data = {
   generatedAt: '2026-10-01T00:00:00Z',
+  genres: { 28: 'Ação', 18: 'Drama', 35: 'Comédia', 99: 'Documentário' },
   movies: [
-    movie(1, 'Ação Máxima', { v: 50, n: 9000, r: 6.1, d: '2026-01-01' }),
-    movie(2, 'O Último Voo', { v: 90, n: 600, r: 8.9, d: '2026-09-30', ot: 'The Last Flight' }),
-    movie(3, 'Futuro Distante', { v: 70, n: 50, r: 9.9, d: '2027-03-01' }),
-    movie(4, 'Coração Valente', { v: 5, n: 4000, r: 8.0, d: '1995-05-24' }),
+    movie(1, 'Ação Máxima', { v: 50, n: 9000, r: 6.1, d: '2026-01-01', g: [28] }),
+    movie(2, 'O Último Voo', { v: 90, n: 600, r: 8.9, d: '2026-09-30', ot: 'The Last Flight', g: [28, 18] }),
+    movie(3, 'Futuro Distante', { v: 70, n: 50, r: 9.9, d: '2027-03-01', g: [18] }),
+    movie(4, 'Coração Valente', { v: 5, n: 4000, r: 8.0, d: '1995-05-24', g: [35, 28] }),
     movie(5, 'Sem Nota', { v: 1, r: undefined, n: undefined, d: undefined, p: undefined, b: undefined, o: undefined, rt: undefined }),
   ],
   series: [
-    { i: 10, t: 'Série Boa', y: '2019', p: '/s10.jpg', v: 80, n: 2000, r: 8.4, s: [[1, 8], [2, 10], [3, 5]] },
-    { i: 11, t: 'Outra Série', y: '2021', v: 20, n: 300, s: [[1, 3]] },
-    { i: 12, t: 'Voo da Série', y: '2022', v: 30, n: 10, s: [] },
+    { i: 10, t: 'Série Boa', y: '2019', p: '/s10.jpg', v: 80, n: 2000, r: 8.4, g: [18, 10759], s: [[1, 8], [2, 10], [3, 5]] },
+    { i: 11, t: 'Outra Série', y: '2021', v: 20, n: 300, g: [35], s: [[1, 3]] },
+    { i: 12, t: 'Voo da Série', y: '2022', v: 30, n: 10, g: [10765], s: [] },
   ],
 };
 
@@ -94,3 +95,89 @@ test('lista desconhecida é 404; catálogo vazio é 503 catalog_empty (nunca 403
   await assert.rejects(empty.list('trending-movies', 1), { status: 503, code: 'catalog_empty' });
   await assert.rejects(empty.search('qualquer coisa'), { status: 503, code: 'catalog_empty' });
 });
+
+test('gêneros: lista só os que têm filme, em ordem alfabética pt-BR, e devolve cópias', () => {
+  assert.deepEqual(catalog.genres(), [
+    { id: 28, name: 'Ação' },
+    { id: 35, name: 'Comédia' },
+    { id: 18, name: 'Drama' },
+  ]);
+  catalog.genres()[0].name = 'alterado';
+  assert.equal(catalog.genres()[0].name, 'Ação', 'mexer no retorno não altera o catálogo');
+});
+
+test('catálogo sem gêneros: genres() vazio e recommend sem resultado', () => {
+  const old = createCatalog({ data: { generatedAt: 'x', movies: data.movies.map(({ g, ...rest }) => rest), series: [] }, now: () => NOW });
+  assert.deepEqual(old.genres(), []);
+  assert.deepEqual(old.recommend([28, 18]), { first: [], second: [], both: [] });
+});
+
+const keys = (items) => items.map((item) => `${item.type}:${item.id}`);
+
+test('recomendação: só do gênero 1, só do gênero 2 e os que têm os dois, misturando filme e série, sem repetir', () => {
+  // Ação (28) = filme com 28 / série com Action & Adventure (10759); Drama (18) = filme e série com 18
+  const { first, second, both } = catalog.recommend([28, 18]);
+  assert.deepEqual(keys(first), ['movie:1', 'movie:4'], 'só Ação: filmes 1 e 4 (a série 10 é Ação E Drama)');
+  assert.deepEqual(keys(second), ['movie:3'], 'só Drama');
+  assert.deepEqual(keys(both), ['movie:2', 'tv:10'], 'os dois gêneros: um filme e uma série, intercalados');
+  const all = [...keys(first), ...keys(second), ...keys(both)];
+  assert.equal(new Set(all).size, all.length, 'nenhum título aparece em duas listas');
+  assert.equal(both[1].type, 'tv');
+});
+
+test('recomendação: série pelos equivalentes do TMDB, e gênero sem equivalente (Terror) só recomenda filme', () => {
+  // Fantasia (14) -> Sci-Fi & Fantasy (série 12); Comédia (35) -> filme 4 e série 11
+  const { first, second, both } = catalog.recommend([35, 14]);
+  assert.deepEqual(keys(first), ['tv:11', 'movie:4'], 'série mais popular primeiro, depois o filme');
+  assert.deepEqual(keys(second), ['tv:12']);
+  assert.deepEqual(both, []);
+
+  const horror = createCatalog({
+    data: {
+      generatedAt: 'x',
+      genres: { 27: 'Terror', 28: 'Ação' },
+      movies: [movie(100, 'Susto', { g: [27] }), movie(101, 'Susto de Ação', { g: [27, 28] })],
+      series: [{ i: 200, t: 'Série de Ação', v: 10, g: [10759], s: [[1, 1]] }],
+    },
+    now: () => NOW,
+  });
+  const result = horror.recommend([27, 28]);
+  assert.deepEqual(keys(result.first), ['movie:100'], 'Terror não tem equivalente em série: só filme');
+  assert.deepEqual(keys(result.second), ['tv:200']);
+  assert.deepEqual(keys(result.both), ['movie:101']);
+});
+
+test('recomendação: não sugere o que o usuário já abriu', () => {
+  const { first, second, both } = catalog.recommend([28, 18], new Set(['movie:1', 'tv:10']));
+  assert.deepEqual(keys(first), ['movie:4']);
+  assert.deepEqual(keys(second), ['movie:3']);
+  assert.deepEqual(keys(both), ['movie:2']);
+});
+
+test('recomendação: intercala filme e série pela popularidade e respeita o limite', () => {
+  const movies = Array.from({ length: 50 }, (_, k) => movie(1000 + k, `Filme ${k}`, { g: [28], v: 1000 - k }));
+  const series = Array.from({ length: 50 }, (_, k) => ({ i: 2000 + k, t: `Série ${k}`, v: 500 - k, g: [10759], s: [[1, 1]] }));
+  const big = createCatalog({ data: { generatedAt: 'x', genres: { 28: 'Ação', 99: 'Documentário' }, movies, series }, now: () => NOW });
+  const { first } = big.recommend([28, 99]);
+  assert.equal(first.length, 30);
+  assert.deepEqual(first.slice(0, 6).map((item) => item.type), ['movie', 'tv', 'movie', 'tv', 'movie', 'tv'], 'alterna filme e série');
+  assert.equal(first[0].id, '1000', 'começa pelo mais popular (filme)');
+  assert.equal(big.recommend([28, 99], new Set(), 5).first.length, 5);
+});
+
+test('recomendação: poucos títulos nos dois gêneros completa a lista mistura com os próximos de cada gênero', () => {
+  const a = Array.from({ length: 40 }, (_, k) => movie(3000 + k, `A${k}`, { g: [28], v: 900 - k }));
+  const b = Array.from({ length: 40 }, (_, k) => movie(4000 + k, `B${k}`, { g: [18], v: 800 - k }));
+  const ab = [movie(5000, 'Os dois 1', { g: [28, 18], v: 10 }), movie(5001, 'Os dois 2', { g: [28, 18], v: 9 })];
+  const pad = createCatalog({ data: { generatedAt: 'x', genres: { 28: 'Ação', 18: 'Drama' }, movies: [...a, ...b, ...ab], series: [] }, now: () => NOW });
+  const { first, second, both } = pad.recommend([28, 18]);
+  assert.deepEqual(keys(both).slice(0, 2), ['movie:5000', 'movie:5001'], 'os que têm os dois vêm primeiro');
+  assert.equal(both.length, 22, '2 dos dois gêneros + 10 extras de cada lado');
+  const shown = new Set([...keys(first), ...keys(second)]);
+  assert.ok(keys(both).every((key) => !shown.has(key) || key.startsWith('movie:50')), 'o preenchimento não repete o que já está nas outras listas');
+});
+
+test('recomendação: sem nenhum título do gênero devolve listas vazias', () => {
+  assert.deepEqual(catalog.recommend([99, 37]), { first: [], second: [], both: [] });
+});
+

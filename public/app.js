@@ -59,7 +59,7 @@ function writeStore(key, value) {
 
 // --- sessão e API ---
 
-const session = { token: null, name: null };
+const session = { token: null, name: null, genres: null, needsGenres: false };
 
 try {
   session.token = localStorage.getItem(TOKEN_KEY);
@@ -70,6 +70,8 @@ try {
 function clearSession(message) {
   session.token = null;
   session.name = null;
+  session.genres = null;
+  session.needsGenres = false;
   flash = message ?? null;
   try {
     localStorage.removeItem(TOKEN_KEY);
@@ -103,8 +105,16 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+// Perfil devolvido pelo servidor no login e em /auth/me: nome, gêneros favoritos e se ainda falta escolhê-los.
+function applyProfile(profile) {
+  session.name = profile.name;
+  session.genres = profile.genres ?? null;
+  session.needsGenres = Boolean(profile.needsGenres);
+}
+
 function updateChrome() {
   document.body.classList.toggle('anon', !session.token);
+  document.body.classList.toggle('onboarding', Boolean(session.token && session.needsGenres));
   userName.textContent = session.name ?? '';
 }
 
@@ -163,7 +173,7 @@ function row(title, items, href) {
   return el(
     'section',
     { class: 'row' },
-    el('div', { class: 'row-head' }, el('h2', {}, title), el('a', { href }, 'Ver tudo')),
+    el('div', { class: 'row-head' }, el('h2', {}, title), href && el('a', { href }, 'Ver tudo')),
     el('div', { class: 'row-scroll' }, items.map(card)),
   );
 }
@@ -243,7 +253,7 @@ function renderLogin() {
             body: { email: form.elements.email.value, password: form.elements.password.value },
           });
           session.token = data.token;
-          session.name = data.user.name;
+          applyProfile(data.user);
           try {
             localStorage.setItem(TOKEN_KEY, data.token);
           } catch {
@@ -340,6 +350,75 @@ function renderCredits() {
   );
 }
 
+// Escolha dos 2 gêneros de filme favoritos: obrigatória para quem ainda não escolheu (novo ou antigo), editável depois.
+async function renderGenres(token) {
+  app.replaceChildren(spinner());
+  let data;
+  try {
+    data = await api('me/preferences');
+  } catch (err) {
+    if (token === navToken) app.replaceChildren(errorState(err.message, () => route()));
+    return;
+  }
+  if (token !== navToken) return;
+  applyProfile({ name: session.name, genres: data.genres, needsGenres: data.needsGenres });
+  updateChrome();
+
+  if (!data.options.length) {
+    app.replaceChildren(el('div', { class: 'auth-wrap' }, el('div', { class: 'auth-card' }, el('h1', {}, 'Gêneros indisponíveis'), el('p', { class: 'auth-hint' }, 'O catálogo atual ainda não tem gêneros. Volte mais tarde.'), el('a', { class: 'btn', href: '#/' }, 'Voltar'))));
+    return;
+  }
+
+  let selected = (data.genres ?? []).map((genre) => genre.id);
+  const count = el('p', { class: 'chip-count', 'aria-live': 'polite' });
+  const error = el('p', { class: 'form-error', role: 'alert' });
+  const save = el('button', { class: 'btn primary', type: 'button', onclick: () => submit() }, 'Salvar e continuar');
+  const chips = data.options.map((option) =>
+    el('button', { class: 'chip', type: 'button', 'aria-pressed': 'false', onclick: () => toggle(option.id) }, option.name),
+  );
+
+  function refresh() {
+    chips.forEach((chip, i) => chip.setAttribute('aria-pressed', String(selected.includes(data.options[i].id))));
+    count.textContent = `${selected.length} de 2 escolhidos`;
+    save.disabled = selected.length !== 2;
+  }
+
+  // O terceiro toque tira o primeiro escolhido: sempre sobram no máximo 2.
+  function toggle(id) {
+    error.textContent = '';
+    selected = selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id].slice(-2);
+    refresh();
+  }
+
+  async function submit() {
+    save.disabled = true;
+    error.textContent = '';
+    try {
+      const saved = await api('me/preferences', { method: 'POST', body: { genres: selected } });
+      applyProfile({ name: session.name, genres: saved.genres, needsGenres: saved.needsGenres });
+      updateChrome();
+      location.hash = '#/';
+    } catch (err) {
+      error.textContent = err.message;
+      refresh();
+    }
+  }
+
+  app.replaceChildren(
+    el(
+      'div',
+      { class: 'page genres-page' },
+      el('h1', {}, 'Quais são seus gêneros favoritos?'),
+      el('p', { class: 'auth-hint' }, 'Escolha 2 gêneros de filme. Usamos isso para montar as suas recomendações, e você pode mudar depois.'),
+      el('div', { class: 'chips', role: 'group', 'aria-label': 'Gêneros de filme' }, chips),
+      count,
+      error,
+      el('div', { class: 'genres-actions' }, save, !session.needsGenres && el('a', { class: 'btn', href: '#/' }, 'Cancelar')),
+    ),
+  );
+  refresh();
+}
+
 async function renderDecision(token, navId) {
   app.replaceChildren(spinner());
   if (token) history.replaceState(null, '', '#/decisao'); // tira o token da barra de endereço
@@ -400,20 +479,39 @@ async function renderDecision(token, navId) {
 async function renderHome(token) {
   app.replaceChildren(spinner());
   const names = ['trending-movies', 'trending-shows', 'top-movies', 'recent-movies'];
-  const [libraryResult, ...results] = await Promise.allSettled([api('me/library'), ...names.map((name) => api(`list/${name}`))]);
+  const favorites = session.genres ?? [];
+  const settled = await Promise.allSettled([
+    api('me/library'),
+    favorites.length ? api('me/recommendations') : Promise.resolve({ rows: [] }),
+    ...names.map((name) => api(`list/${name}`)),
+  ]);
   if (token !== navToken) return;
+  const [libraryResult, recommendationsResult, ...results] = settled;
 
   const page = el('div');
   const featured = results[0].status === 'fulfilled' ? results[0].value.items.filter((i) => i.poster && i.backdrop).slice(0, HERO_SIZE) : [];
   if (featured.length) page.append(hero(featured));
 
-  if (libraryResult.status === 'fulfilled') {
-    const { continue: resume, watched } = libraryResult.value;
-    remember([...resume, ...watched]);
-    if (resume.length) page.append(row('Continuar assistindo', resume, '#/biblioteca'));
-    if (watched.length) page.append(row('Assistir novamente', watched, '#/biblioteca'));
+  const library = libraryResult.status === 'fulfilled' ? libraryResult.value : { continue: [], watched: [] };
+  remember([...library.continue, ...library.watched]);
+
+  // 1. continuar assistindo
+  if (library.continue.length) page.append(row('Continuar assistindo', library.continue, '#/biblioteca'));
+
+  // 2. gosto 1, gosto 2 e a mistura dos dois (filmes e séries, sem "Ver tudo")
+  if (favorites.length) {
+    page.append(
+      el('p', { class: 'genre-bar' }, 'Seus gêneros: ', el('strong', {}, favorites.map((genre) => genre.name).join(' · ')), ' — ', el('a', { href: '#/generos' }, 'alterar')),
+    );
+    if (recommendationsResult.status === 'fulfilled') {
+      for (const { title, items } of recommendationsResult.value.rows) {
+        remember(items);
+        page.append(row(title, items));
+      }
+    }
   }
 
+  // 3. as fileiras de sempre
   let loaded = 0;
   results.forEach((result, i) => {
     if (result.status !== 'fulfilled' || !result.value.items.length) return;
@@ -427,6 +525,9 @@ async function renderHome(token) {
     app.replaceChildren(errorState(firstError?.reason?.message ?? 'catálogo vazio', () => route()));
     return;
   }
+
+  // 4. por último, assistir novamente
+  if (library.watched.length) page.append(row('Assistir novamente', library.watched, '#/biblioteca'));
   app.replaceChildren(page);
 }
 
@@ -463,11 +564,12 @@ function renderPagedGrid(title, loadPage, token) {
 }
 
 function renderList(name, token) {
-  if (!LIST_TITLES[name]) {
+  const title = LIST_TITLES[name];
+  if (!title) {
     app.replaceChildren(errorState('lista inexistente'));
     return;
   }
-  renderPagedGrid(LIST_TITLES[name], (page) => api(`list/${name}?page=${page}`), token);
+  renderPagedGrid(title, (page) => api(`list/${name}?page=${page}`), token);
 }
 
 function renderSearch(term, token) {
@@ -715,6 +817,11 @@ function route() {
     return hash === '#/login' ? renderLogin() : renderRegister();
   }
   if (!session.token) return location.replace('#/login');
+  if (session.needsGenres && hash !== '#/generos') return location.replace('#/generos');
+  if (hash === '#/generos') {
+    setActiveNav(null);
+    return renderGenres(token);
+  }
 
   if ((match = hash.match(/^#\/lista\/([a-z-]+)$/))) {
     setActiveNav(match[1]);
@@ -772,7 +879,7 @@ async function boot() {
   updateChrome();
   if (session.token) {
     try {
-      session.name = (await api('auth/me')).name;
+      applyProfile(await api('auth/me'));
     } catch {
       /* 401 já limpou a sessão; falha de rede deixa as telas mostrarem o erro */
     }

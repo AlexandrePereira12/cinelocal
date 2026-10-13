@@ -17,7 +17,12 @@
  *   `last_episode_to_air` ficam de fora (o TMDB conta episódios futuros).
  * - Formato: um item por linha (diff do git legível), campos nulos omitidos, sinopse cortada em 240 caracteres.
  *   Chaves curtas: i id · t título · ot título original · y ano · d data · p pôster · b backdrop · r nota ·
- *   n votos · v popularidade · o sinopse · rt duração (filme) · s temporadas [[número, episódios], ...] (série).
+ *   n votos · v popularidade · o sinopse · rt duração (filme) · g ids de gênero (filme e série, cada um no seu
+ *   conjunto de ids) · s temporadas [[número, episódios], ...] (série).
+ *   Topo do arquivo: `genres` (filme) e `tvGenres` (série) = { idDoGênero: "nome em pt-BR" }.
+ * - Atualização automática: .github/workflows/atualizar-catalogo.yml roda este mesmo script toda semana no GitHub
+ *   e, se o catálogo mudou, faz o commit (o Netlify publica sozinho). Se o embedplayapi recusar o IP do GitHub, o
+ *   passo 1/3 falha com código ≠ 0 e o catálogo atual fica como está.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -120,9 +125,14 @@ function common(d, title, original, date) {
   };
 }
 
+function genreIds(d) {
+  const ids = (Array.isArray(d.genres) ? d.genres : []).map((g) => g?.id).filter((id) => Number.isInteger(id) && id > 0);
+  return ids.length ? ids : undefined;
+}
+
 export function compactMovie(d) {
   if (!d || d.adult === true || !d.title) return null;
-  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined };
+  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined, g: genreIds(d) };
 }
 
 export function compactSeries(d, today) {
@@ -140,7 +150,7 @@ export function compactSeries(d, today) {
       seasons.push([number, count]);
     }
   }
-  return { ...common(d, d.name, d.original_name, d.first_air_date), s: seasons };
+  return { ...common(d, d.name, d.original_name, d.first_air_date), g: genreIds(d), s: seasons };
 }
 
 // --- coleta no TMDB ---
@@ -158,7 +168,7 @@ function createPacer(minIntervalMs, sleep) {
 export async function collect({ ids, token, fetchImpl = fetch, today, concurrency = 10, minIntervalMs = 30, sleep = defaultSleep, onProgress }) {
   const pace = createPacer(minIntervalMs, sleep);
   const jobs = [...ids.movies.map((id) => ['movie', id]), ...ids.series.map((id) => ['tv', id])];
-  const result = { movies: [], series: [], stats: { total: jobs.length, ok: 0, notFound: 0, failed: 0, discarded: 0 } };
+  const result = { movies: [], series: [], genres: {}, tvGenres: {}, stats: { total: jobs.length, ok: 0, notFound: 0, failed: 0, discarded: 0 } };
   let cursor = 0;
   let done = 0;
 
@@ -182,6 +192,11 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
           else {
             (kind === 'movie' ? result.movies : result.series).push(entry);
             result.stats.ok++;
+            // Nomes dos gêneros (já em pt-BR) vêm das próprias respostas. Filme e série usam ids de gênero diferentes no TMDB.
+            const names = kind === 'movie' ? result.genres : result.tvGenres;
+            for (const g of reply.data.genres ?? []) {
+              if (Number.isInteger(g?.id) && typeof g.name === 'string' && g.name.trim()) names[g.id] = g.name.trim();
+            }
           }
         }
       } catch (err) {
@@ -202,9 +217,12 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
 
 // --- gates e gravação ---
 
-export function checkGates({ stats, kept, previousTotal }) {
+export const MIN_GENRES = 10; // o TMDB tem cerca de 19 gêneros de filme
+
+export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES }) {
   const problems = [];
   if (kept === 0) problems.push('nenhum título coletado');
+  if (kept > 0 && genreCount < MIN_GENRES) problems.push(`o TMDB devolveu só ${genreCount} gêneros (esperado ao menos ${MIN_GENRES}); a seleção de gêneros ficaria quebrada`);
   if (stats.total > 0 && stats.failed / stats.total > GATES.maxFailedRatio) {
     problems.push(`falhas de rede/TMDB demais: ${stats.failed} de ${stats.total} (teto ${GATES.maxFailedRatio * 100}%)`);
   }
@@ -217,12 +235,14 @@ export function checkGates({ stats, kept, previousTotal }) {
   return problems;
 }
 
-export function serialize({ generatedAt, movies, series }) {
+export function serialize({ generatedAt, genres = {}, tvGenres = {}, movies, series }) {
   const lines = (items) => items.map((item) => `    ${JSON.stringify(item)}`).join(',\n');
   return [
     '// Gerado por scripts/atualizar-catalogo.mjs (npm run atualizar-catalogo). Não edite à mão.',
     'export default {',
     `  generatedAt: ${JSON.stringify(generatedAt)},`,
+    `  genres: ${JSON.stringify(genres)},`,
+    `  tvGenres: ${JSON.stringify(tvGenres)},`,
     '  movies: [',
     lines(movies),
     '  ],',
@@ -273,7 +293,8 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
   const { stats } = collected;
   const kept = collected.movies.length + collected.series.length;
 
-  const problems = checkGates({ stats, kept, previousTotal: await previousTotal(file) });
+  const genreCount = Object.keys(collected.genres).length;
+  const problems = checkGates({ stats, kept, previousTotal: await previousTotal(file), genreCount });
   if (problems.length) {
     const error = new Error(`snapshot rejeitado, o catálogo atual foi mantido:\n  - ${problems.join('\n  - ')}`);
     error.stats = stats;
@@ -281,10 +302,11 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
   }
 
   log('3/3 gravando…');
-  writeAtomic(file, serialize({ generatedAt: new Date().toISOString(), movies: collected.movies, series: collected.series }));
+  writeAtomic(file, serialize({ generatedAt: new Date().toISOString(), genres: collected.genres, tvGenres: collected.tvGenres, movies: collected.movies, series: collected.series }));
   const summary = {
     filmes: collected.movies.length,
     series: collected.series.length,
+    generos: genreCount,
     inexistentesNoTmdb: stats.notFound,
     falhas: stats.failed,
     descartados: stats.discarded,

@@ -1,0 +1,55 @@
+# Atualiza o catálogo toda semana e, se mudou, commita (o Netlify publica sozinho a cada push).
+#
+# Custo: cada commit é um deploy de produção no Netlify (15 créditos do plano grátis, que tem 300 por mês).
+# Semanal dá uns 60 créditos por mês. Diário (450) estouraria o plano e pausaria todos os sites da conta.
+#
+# O IP do GitHub é de datacenter e o embedplayapi pode recusá-lo. Se isso acontecer, o passo "Gerar catálogo"
+# falha em "1/3 baixando a lista de ids" (o GitHub avisa por e-mail) e o catálogo atual fica como está;
+# nesse caso rode `npm run atualizar-catalogo` no seu PC.
+#
+# Configuração única: GitHub > Settings > Secrets and variables > Actions > New repository secret
+#   Nome: TMDB_TOKEN   Valor: o "API Read Access Token" do TMDB (o mesmo do seu .env)
+
+name: Atualizar catálogo
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # segunda-feira, 09:00 UTC (06:00 em Brasília)
+  workflow_dispatch: # botão "Run workflow" na aba Actions, para atualizar na hora
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atualizar-catalogo
+  cancel-in-progress: false
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # O script só usa módulos nativos do Node: não precisa de npm install.
+      - name: Gerar catálogo
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+        run: node scripts/atualizar-catalogo.mjs
+
+      # Só chega aqui se o script terminou com sucesso (o snapshot passou em todos os gates).
+      - name: Commitar se mudou
+        run: |
+          if git diff --quiet -- netlify/data/catalogo.mjs; then
+            echo "Catálogo sem mudanças."
+            exit 0
+          fi
+          git config user.name "catalogo-bot"
+          git config user.email "catalogo-bot@users.noreply.github.com"
+          git add netlify/data/catalogo.mjs
+          git commit -m "Atualiza o catálogo (automático)"
+          git push

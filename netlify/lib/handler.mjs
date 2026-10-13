@@ -15,6 +15,10 @@
  * - O link do e-mail usa SITE_URL (nunca o header Host, que permitiria injetar link de phishing) e abre uma
  *   página de confirmação; a decisão é um POST com token assinado (uso único: só vale com status `pending`).
  * - POST só com application/json e corpo pequeno; sem CORS (mesma origem); respostas `no-store`.
+ * - Gêneros favoritos (exatamente 2, só de filme) ficam no registro do usuário. `needsGenres` vem do servidor e
+ *   só é verdadeiro se o catálogo tem gêneros: usuário antigo e novo veem a escolha na próxima entrada.
+ * - Recomendações da home saem dos 2 gêneros escolhidos (filme e série) e nunca incluem título que já está no
+ *   histórico do usuário; a lógica fica no catálogo (`recommend`), aqui só se monta a resposta.
  * - Histórico guarda temporada/episódio (a posição em minutos não existe: o player é um iframe de outra origem).
  *   O embed em si é público no provedor: o bloqueio é do app, não do provedor.
  */
@@ -106,6 +110,20 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
     const entry = await stores.users.get(payload.sub);
     if (!entry || entry.value.status !== 'approved') throw unauthorized();
     return { id: payload.sub, user: entry.value };
+  }
+
+  // Gêneros favoritos do usuário já resolvidos para {id, name}. Se o catálogo mudou e não restam 2 válidos, vale como "não escolheu".
+  function pickedGenres(user) {
+    const options = new Map(catalog.genres().map((genre) => [genre.id, genre]));
+    const picked = (Array.isArray(user.genres) ? user.genres : []).map((id) => options.get(id)).filter(Boolean);
+    return picked.length === 2 ? picked : null;
+  }
+
+  // Única forma de montar o que sai do registro do usuário: nunca devolve hash de senha, e-mail nem status.
+  // `needsGenres` só é verdadeiro se o catálogo tem opções de gênero (catálogo antigo não obriga ninguém a escolher).
+  function profile(user) {
+    const genres = pickedGenres(user);
+    return { name: user.name, genres, needsGenres: genres === null && catalog.genres().length > 0 };
   }
 
   async function guard(prefix, ip, { limit, windowMs }) {
@@ -204,7 +222,7 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
 
     const iat = nowSeconds();
     const token = signToken({ typ: 'access', sub: user.id, iat, exp: iat + ACCESS_TTL_S }, key);
-    return json(200, { token, user: { name: user.name } });
+    return json(200, { token, user: profile(user) });
   }
 
   function decisionPayload(body) {
@@ -333,13 +351,62 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
     });
   }
 
+  // --- gêneros favoritos ---
+
+  function preferences(user) {
+    return json(200, { ...profile(user), options: catalog.genres() });
+  }
+
+  async function savePreferences(req, { id: uid }) {
+    const body = await readJson(req);
+    const options = catalog.genres();
+    if (!options.length) throw new HttpError(409, 'Os gêneros não estão disponíveis neste catálogo', 'genres_unavailable');
+
+    const ids = body.genres;
+    const valid =
+      Array.isArray(ids) &&
+      ids.length === 2 &&
+      new Set(ids).size === 2 &&
+      ids.every((id) => Number.isInteger(id) && options.some((option) => option.id === id));
+    if (!valid) throw v.badRequest('Escolha exatamente 2 gêneros diferentes da lista');
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const entry = await stores.users.get(uid);
+      if (!entry || entry.value.status !== 'approved') throw unauthorized();
+      const next = { ...entry.value, genres: ids };
+      if (await stores.users.put(uid, next, entry.etag)) return preferences(next);
+    }
+    throw new HttpError(409, 'Conflito ao salvar. Tente de novo.', 'conflict');
+  }
+
+  // Três fileiras da home (gosto 1, gosto 2 e a mistura dos dois), com filme e série e sem o que o usuário já abriu.
+  async function recommendations({ id: uid, user }) {
+    const genres = pickedGenres(user);
+    if (!genres) return json(200, { rows: [] });
+    const entry = await stores.library.get(uid);
+    const exclude = new Set(Object.keys(entry?.value.items ?? {}));
+    const { first, second, both } = catalog.recommend(
+      genres.map((genre) => genre.id),
+      exclude,
+    );
+    const rows = [
+      { id: 'gosto-1', title: `Mais de ${genres[0].name}`, items: first },
+      { id: 'gosto-2', title: `Mais de ${genres[1].name}`, items: second },
+      { id: 'mix', title: `${genres[0].name} + ${genres[1].name}`, items: both },
+    ].filter((row) => row.items.length);
+    return json(200, { rows });
+  }
+
   // --- roteamento ---
 
   const PROTECTED = [
-    ['GET', /^\/api\/auth\/me$/, async (_req, _url, _m, session) => json(200, { name: session.user.name })],
+    ['GET', /^\/api\/auth\/me$/, async (_req, _url, _m, session) => json(200, profile(session.user))],
+    ['GET', /^\/api\/me\/preferences$/, async (_req, _url, _m, session) => preferences(session.user)],
+    ['POST', /^\/api\/me\/preferences$/, (req, _url, _m, session) => savePreferences(req, session)],
+    ['GET', /^\/api\/me\/recommendations$/, (_req, _url, _m, session) => recommendations(session)],
     [
       'GET',
-      /^\/api\/list\/([a-z-]{1,30})$/,
+      /^\/api\/list\/([a-z0-9-]{1,30})$/,
       async (_req, url, m) => {
         const page = url.searchParams.has('page') ? Number(url.searchParams.get('page')) : 1;
         if (!v.intInRange(page, 1, 2000)) throw v.badRequest();
@@ -382,15 +449,18 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
       const open = PUBLIC.find(([method, route]) => method === req.method && route === path);
       if (open) return await open[2](req, ip);
 
+      // O mesmo caminho pode ter mais de um método (GET e POST em /me/preferences): só vira 405 se nenhum casar.
+      let knownPath = false;
       for (const [method, pattern, run] of PROTECTED) {
         const match = path.match(pattern);
         if (!match) continue;
-        if (method !== req.method) throw new HttpError(405, 'Método não permitido', 'method_not_allowed');
+        knownPath = true;
+        if (method !== req.method) continue;
         const session = await authenticate(req);
         return await run(req, url, match, session);
       }
 
-      if (PUBLIC.some(([, route]) => route === path)) throw new HttpError(405, 'Método não permitido', 'method_not_allowed');
+      if (knownPath || PUBLIC.some(([, route]) => route === path)) throw new HttpError(405, 'Método não permitido', 'method_not_allowed');
       throw new HttpError(404, 'Rota inexistente', 'not_found');
     } catch (err) {
       if (err instanceof HttpError) return json(err.status, { error: err.message, code: err.code });
