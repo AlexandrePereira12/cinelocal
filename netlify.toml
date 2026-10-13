@@ -25,3 +25,20 @@
     X-Robots-Tag = "noindex, nofollow"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     Strict-Transport-Security = "max-age=31536000"
+
+# Páginas da TV e do receptor do Chromecast: TV antiga guarda arquivo em cache por conta própria (mesmo com ETag) e
+# ficaria rodando o tv.js velho depois de uma correção. Aqui nada é guardado: são poucos KB por abertura da página.
+# (Em tv.html/receiver.html as URLs dos scripts também levam ?v=N: troque o número ao mexer neles.)
+[[headers]]
+  for = "/tv*"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Pragma = "no-cache"
+    Expires = "0"
+
+[[headers]]
+  for = "/receiver*"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Pragma = "no-cache"
+    Expires = "0"

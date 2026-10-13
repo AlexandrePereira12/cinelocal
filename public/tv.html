@@ -7,8 +7,9 @@
   <meta name="theme-color" content="#0b0b10">
   <title>Cine Local na TV</title>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="tv.css">
+  <link rel="stylesheet" href="tv.css?v=2">
 </head>
+<!-- Ao mudar tv.js, tv-player.js ou tv.css, troque o ?v= abaixo: TV antiga guarda arquivo em cache. -->
 <body class="tv">
   <main class="tv-wait" id="wait"><div class="tv-wait-inner">
     <p class="tv-brand">Cine<span>Local</span></p>
@@ -26,7 +27,7 @@
     <div class="tv-player" id="player"></div>
     <p class="tv-now" id="now" hidden></p>
   </div>
-  <script src="tv-player.js"></script>
-  <script src="tv.js"></script>
+  <script src="tv-player.js?v=2"></script>
+  <script src="tv.js?v=2"></script>
 </body>
 </html>

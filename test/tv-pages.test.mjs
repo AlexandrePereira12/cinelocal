@@ -83,7 +83,7 @@ test('as páginas da TV não têm script nem estilo inline (a CSP bloquearia) e 
     const html = await text(file);
     assert.ok(!/<script(?![^>]*\ssrc=)/i.test(html), `${file}: script inline`);
     assert.ok(!/<style\b/i.test(html) && !/\sstyle=/i.test(html), `${file}: estilo inline`);
-    assert.ok(html.indexOf('tv-player.js') > -1 && html.indexOf('tv-player.js') < html.indexOf(file.includes('receiver') ? 'receiver.js' : 'tv.js"'), `${file}: tv-player.js deve vir antes`);
+    assert.ok(html.indexOf('tv-player.js') > -1 && html.indexOf('tv-player.js') < html.indexOf(file.includes('receiver') ? 'receiver.js?' : 'tv.js?'), `${file}: tv-player.js deve vir antes`);
   }
   assert.match(await text('public/receiver.html'), /src="https:\/\/www\.gstatic\.com\/cast\/sdk\/libs\/caf_receiver\/v3\/cast_receiver_framework\.js"/);
 });
@@ -111,4 +111,21 @@ test('o ícone do cabeçalho do painel da TV e o painel não carregam nada do Go
   const body = app.slice(app.indexOf('async function castContext()'));
   assert.ok(body.indexOf('if (!appId') < body.indexOf('loadCastSdk()'), 'sem App ID não pode carregar o SDK');
   assert.ok(!/<script[^>]*gstatic/.test(await text('public/index.html')), 'index.html não pode carregar o SDK direto');
+});
+
+test('as páginas da TV não ficam em cache (cabeçalhos) e os scripts levam versão na URL', async () => {
+  const toml = await text('netlify.toml');
+  for (const path of ['/tv*', '/receiver*']) {
+    const block = toml.split('[[headers]]').find((b) => b.includes(`for = "${path}"`));
+    assert.ok(block, `falta o bloco de cabeçalhos de ${path}`);
+    assert.match(block, /Cache-Control = "no-cache, no-store, must-revalidate"/);
+    assert.match(block, /Pragma = "no-cache"/);
+    assert.match(block, /Expires = "0"/);
+  }
+  assert.ok(!/Cache-Control/.test(toml.split('[[headers]]')[1]), 'o bloco global (/*) não deve mexer em cache: só a TV');
+
+  for (const [file, scripts] of [['public/tv.html', ['tv.css', 'tv-player.js', 'tv.js']], ['public/receiver.html', ['tv.css', 'tv-player.js', 'receiver.js']]]) {
+    const html = await text(file);
+    for (const name of scripts) assert.match(html, new RegExp(`(href|src)="${name.replace('.', '\\.')}\\?v=\\d+"`), `${file}: ${name} sem ?v=`);
+  }
 });
