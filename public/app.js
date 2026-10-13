@@ -19,6 +19,8 @@ const searchInput = document.getElementById('search');
 const searchForm = document.getElementById('search-form');
 const userName = document.getElementById('user-name');
 
+document.getElementById('year').textContent = new Date().getFullYear();
+
 let navToken = 0;
 let heroTimer = null;
 let flash = null;
@@ -227,8 +229,189 @@ function hero(items) {
   return root;
 }
 
-function field(label, id, attrs) {
-  return el('div', { class: 'field' }, el('label', { for: id }, label), el('input', { id, name: id, required: true, ...attrs }));
+// --- formulários de login e cadastro ---
+
+// Espelham netlify/lib/validate.mjs (validPassword e EMAIL_RE): quem decide é o servidor, aqui é só o aviso antes do envio.
+const PASSWORD_RULES = [
+  { label: 'Pelo menos 4 caracteres', test: (value) => value.length >= 4 },
+  { label: 'Uma letra maiúscula', test: (value) => /\p{Lu}/u.test(value) },
+  { label: 'Uma letra minúscula', test: (value) => /\p{Ll}/u.test(value) },
+  { label: 'Um número', test: (value) => /[0-9]/.test(value) },
+  { label: 'Um símbolo: @ _ ou .', test: (value) => /[@_.]/.test(value) },
+];
+const EMAIL_RE = /^[^\s@<>()[\]\\,;:"]{1,64}@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+function looksLikeEmail(value) {
+  const email = value.trim().toLowerCase();
+  return email.length <= 254 && EMAIL_RE.test(email);
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const ICONS = {
+  mail: ['M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z', 'M22 6l-10 7L2 6'],
+  lock: ['M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z', 'M7 11V7a5 5 0 0 1 10 0v4'],
+  user: ['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2', 'M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
+  eye: ['M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+  eyeOff: [
+    'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24',
+    'M1 1l22 22',
+  ],
+  check: ['M20 6L9 17l-5-5'],
+  play: ['M6 4l14 8-14 8z'],
+  star: ['M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'],
+  bookmark: ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'],
+};
+
+// SVG inline montado por DOM (a CSP do site não aceita atributo style nem imagem de outra origem).
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'icon');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const d of ICONS[name]) {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function field(label, id, attrs, { iconName, trailing } = {}) {
+  return el(
+    'div',
+    { class: 'field' },
+    el('label', { for: id }, label),
+    el(
+      'div',
+      { class: 'input-wrap' },
+      el('span', { class: 'input-icon' }, icon(iconName)),
+      el('input', { id, name: id, required: true, 'aria-describedby': `${id}-msg`, ...attrs }),
+      trailing,
+    ),
+    el('p', { class: 'field-msg', id: `${id}-msg` }),
+  );
+}
+
+// state: 'invalid' | 'valid' | null (neutro). O texto vai na linha logo abaixo do campo.
+function setFieldState(root, state, text = '') {
+  root.classList.toggle('invalid', state === 'invalid');
+  root.classList.toggle('valid', state === 'valid');
+  root.querySelector('.field-msg').textContent = text;
+  root.querySelector('input').setAttribute('aria-invalid', String(state === 'invalid'));
+}
+
+function emailField(attrs) {
+  return field(
+    'E-mail',
+    'email',
+    { type: 'email', autocomplete: 'username', maxlength: '254', placeholder: 'voce@exemplo.com', inputmode: 'email', autocapitalize: 'off', spellcheck: 'false', ...attrs },
+    { iconName: 'mail' },
+  );
+}
+
+// Valida o formato enquanto digita: erro só depois de sair do campo (ou no envio), "ok" assim que o formato fecha.
+function bindEmailValidation(root, { okText = '' } = {}) {
+  const input = root.querySelector('input');
+  let touched = false;
+  function validate(strict = false) {
+    const value = input.value.trim();
+    const valid = looksLikeEmail(value);
+    if (valid) setFieldState(root, 'valid', okText);
+    else if (!value) setFieldState(root, strict ? 'invalid' : null, strict ? 'Informe o seu e-mail.' : '');
+    else if (strict || touched) setFieldState(root, 'invalid', 'Digite um e-mail válido, como nome@exemplo.com.');
+    else setFieldState(root, null);
+    return valid;
+  }
+  input.addEventListener('input', () => validate());
+  input.addEventListener('blur', () => {
+    touched = true;
+    validate();
+  });
+  return validate;
+}
+
+// Campo de senha com botão para mostrar/ocultar o que está sendo digitado e aviso de Caps Lock.
+function passwordField(label, id, attrs) {
+  const toggle = el('button', { class: 'toggle-pass', type: 'button', 'aria-label': 'Mostrar senha', title: 'Mostrar senha' }, icon('eye'));
+  const root = field(
+    label,
+    id,
+    { type: 'password', maxlength: '128', autocapitalize: 'off', spellcheck: 'false', ...attrs },
+    { iconName: 'lock', trailing: toggle },
+  );
+  const input = root.querySelector('input');
+  const caps = el('p', { class: 'field-hint', hidden: true }, 'Caps Lock ligado');
+  root.append(caps);
+
+  toggle.addEventListener('click', () => {
+    const show = input.type === 'password';
+    const text = show ? 'Ocultar senha' : 'Mostrar senha';
+    input.type = show ? 'text' : 'password';
+    toggle.setAttribute('aria-label', text);
+    toggle.title = text;
+    toggle.replaceChildren(icon(show ? 'eyeOff' : 'eye'));
+    input.focus();
+  });
+  const watchCaps = (event) => {
+    caps.hidden = !event.getModifierState?.('CapsLock');
+  };
+  input.addEventListener('keydown', watchCaps);
+  input.addEventListener('keyup', watchCaps);
+  input.addEventListener('blur', () => {
+    caps.hidden = true;
+  });
+  return root;
+}
+
+// Lista de requisitos que vai marcando enquanto digita, mais a barra de força (um segmento por requisito atendido).
+function passwordChecklist(id) {
+  const items = PASSWORD_RULES.map((rule) => el('li', {}, el('span', { class: 'rule-mark', 'aria-hidden': 'true' }), rule.label, el('span', { class: 'sr-only' }, ' (pendente)')));
+  const meter = el('div', { class: 'meter', 'aria-hidden': 'true', 'data-score': '0' }, ...PASSWORD_RULES.map(() => el('span')));
+  return {
+    root: el('div', { class: 'rules-box' }, meter, el('ul', { class: 'rules', id }, ...items)),
+    // Devolve true quando todos os requisitos foram atendidos.
+    update(value) {
+      let score = 0;
+      PASSWORD_RULES.forEach((rule, index) => {
+        const ok = rule.test(value);
+        if (ok) score++;
+        items[index].classList.toggle('ok', ok);
+        items[index].lastChild.textContent = ok ? ' (atendido)' : ' (pendente)';
+      });
+      meter.dataset.score = String(score);
+      return score === PASSWORD_RULES.length;
+    },
+  };
+}
+
+function setBusy(button, busy, label) {
+  button.disabled = busy;
+  button.setAttribute('aria-busy', String(busy));
+  button.textContent = label;
+}
+
+const PERKS = [
+  ['play', 'Filmes e séries num só lugar'],
+  ['star', 'Recomendações pelos seus gêneros favoritos'],
+  ['bookmark', 'Sua lista e o que você já assistiu'],
+];
+
+function cardHead(title, hint) {
+  return [el('span', { class: 'auth-mark' }, icon('play')), el('h1', {}, title), hint && el('p', { class: 'auth-hint' }, hint)];
+}
+
+// Palco do login e do cadastro: fundo de "parede de pôsteres" decorativo, texto de apoio à esquerda e o cartão à direita.
+function authStage({ title, lede }, slot) {
+  const backdrop = el('div', { class: 'auth-backdrop', 'aria-hidden': 'true' }, ...Array.from({ length: 32 }, () => el('span')));
+  const aside = el(
+    'aside',
+    { class: 'auth-aside' },
+    el('h2', {}, ...title),
+    el('p', { class: 'auth-lede' }, lede),
+    el('ul', { class: 'auth-perks' }, ...PERKS.map(([name, text]) => el('li', {}, el('span', { class: 'perk-icon' }, icon(name)), text))),
+  );
+  return el('div', { class: 'auth-stage' }, backdrop, el('div', { class: 'auth-shell' }, aside, slot));
 }
 
 // --- páginas públicas: login, cadastro e decisão do admin ---
@@ -237,20 +420,32 @@ function renderLogin() {
   const message = el('p', { class: 'form-info', role: 'status' }, flash);
   flash = null;
   const error = el('p', { class: 'form-error', role: 'alert' });
-  const submit = el('button', { class: 'btn primary', type: 'submit' }, 'Entrar');
+  const submit = el('button', { class: 'btn primary block', type: 'submit' }, 'Entrar');
+  const emailRoot = emailField();
+  const checkEmail = bindEmailValidation(emailRoot);
+  const passRoot = passwordField('Senha', 'password', { autocomplete: 'current-password' });
 
   const form = el(
     'form',
     {
       class: 'auth-card',
+      novalidate: true,
       onsubmit: async (event) => {
         event.preventDefault();
         error.textContent = '';
-        submit.disabled = true;
+        const { email, password } = form.elements;
+        const emailOk = checkEmail(true);
+        const passOk = Boolean(password.value);
+        setFieldState(passRoot, passOk ? null : 'invalid', passOk ? '' : 'Informe a sua senha.');
+        if (!emailOk || !passOk) {
+          (emailOk ? password : email).focus();
+          return;
+        }
+        setBusy(submit, true, 'Entrando…');
         try {
           const data = await api('auth/login', {
             method: 'POST',
-            body: { email: form.elements.email.value, password: form.elements.password.value },
+            body: { email: email.value, password: password.value },
           });
           session.token = data.token;
           applyProfile(data.user);
@@ -264,73 +459,138 @@ function renderLogin() {
         } catch (err) {
           error.textContent = err.message;
         } finally {
-          submit.disabled = false;
+          setBusy(submit, false, 'Entrar');
         }
       },
     },
-    el('h1', {}, 'Entrar'),
+    ...cardHead('Entrar', 'Use o e-mail e a senha do seu cadastro.'),
     message,
-    field('E-mail', 'email', { type: 'email', autocomplete: 'username', maxlength: '254' }),
-    field('Senha', 'password', { type: 'password', autocomplete: 'current-password', maxlength: '128' }),
+    emailRoot,
+    passRoot,
     error,
     submit,
     el('p', { class: 'auth-alt' }, 'Ainda não tem conta? ', el('a', { href: '#/cadastro' }, 'Solicitar cadastro')),
   );
-  app.replaceChildren(el('div', { class: 'auth-wrap' }, form));
+  passRoot.querySelector('input').addEventListener('input', () => setFieldState(passRoot, null));
+  app.replaceChildren(
+    authStage({ title: ['Bem-vindo de ', el('em', {}, 'volta'), '.'], lede: 'Entre para continuar de onde parou e ver o que separamos para você.' }, el('div', { class: 'auth-slot' }, form)),
+  );
   form.elements.email.focus();
 }
 
 function renderRegister() {
   const error = el('p', { class: 'form-error', role: 'alert' });
-  const submit = el('button', { class: 'btn primary', type: 'submit' }, 'Solicitar cadastro');
-  const wrap = el('div', { class: 'auth-wrap' });
+  const submit = el('button', { class: 'btn primary block', type: 'submit' }, 'Solicitar cadastro');
+  const slot = el('div', { class: 'auth-slot' });
+
+  const nameRoot = field('Nome', 'name', { type: 'text', autocomplete: 'name', maxlength: '60', placeholder: 'Como devemos te chamar?' }, { iconName: 'user' });
+  const emailRoot = emailField();
+  const checkEmail = bindEmailValidation(emailRoot, { okText: 'Formato válido' });
+  const passRoot = passwordField('Senha', 'password', { autocomplete: 'new-password', 'aria-describedby': 'password-msg password-rules' });
+  const checklist = passwordChecklist('password-rules');
+  const repeatRoot = passwordField('Repita a senha', 'password2', { autocomplete: 'new-password' });
+
+  const nameInput = nameRoot.querySelector('input');
+  const passInput = passRoot.querySelector('input');
+  const repeatInput = repeatRoot.querySelector('input');
+  let repeatTouched = false;
+
+  function checkName(strict = false) {
+    const valid = nameInput.value.replace(/\s+/g, ' ').trim().length >= 2;
+    setFieldState(nameRoot, !valid && strict ? 'invalid' : null, !valid && strict ? 'Informe o seu nome (2 a 60 caracteres).' : '');
+    return valid;
+  }
+
+  function checkPassword(strict = false) {
+    const valid = checklist.update(passInput.value);
+    if (strict && !valid) setFieldState(passRoot, 'invalid', 'A senha ainda não atende a todos os requisitos.');
+    else setFieldState(passRoot, valid ? 'valid' : null);
+    return valid;
+  }
+
+  function checkRepeat(strict = false) {
+    const same = repeatInput.value === passInput.value;
+    const valid = same && repeatInput.value !== '';
+    if (valid) setFieldState(repeatRoot, 'valid', 'As senhas conferem.');
+    else if (!repeatInput.value) setFieldState(repeatRoot, strict ? 'invalid' : null, strict ? 'Repita a senha.' : '');
+    else if (strict || repeatTouched || repeatInput.value.length >= passInput.value.length) setFieldState(repeatRoot, 'invalid', 'As senhas não conferem.');
+    else setFieldState(repeatRoot, null);
+    return valid;
+  }
+
+  nameInput.addEventListener('input', () => checkName());
+  passInput.addEventListener('input', () => {
+    checkPassword();
+    if (repeatInput.value) checkRepeat();
+  });
+  repeatInput.addEventListener('input', () => checkRepeat());
+  repeatInput.addEventListener('blur', () => {
+    repeatTouched = true;
+    if (repeatInput.value) checkRepeat();
+  });
 
   const form = el(
     'form',
     {
       class: 'auth-card',
+      novalidate: true,
       onsubmit: async (event) => {
         event.preventDefault();
         error.textContent = '';
-        const { name, email, password, password2 } = form.elements;
-        if (password.value !== password2.value) {
-          error.textContent = 'As senhas não conferem.';
+        const checks = [
+          [nameInput, checkName(true)],
+          [form.elements.email, checkEmail(true)],
+          [passInput, checkPassword(true)],
+          [repeatInput, checkRepeat(true)],
+        ];
+        const firstInvalid = checks.find(([, valid]) => !valid);
+        if (firstInvalid) {
+          error.textContent = 'Corrija os campos destacados.';
+          firstInvalid[0].focus();
           return;
         }
-        submit.disabled = true;
+        setBusy(submit, true, 'Enviando…');
         try {
           const data = await api('auth/register', {
             method: 'POST',
-            body: { name: name.value, email: email.value, password: password.value },
+            body: { name: nameInput.value, email: form.elements.email.value.trim(), password: passInput.value },
           });
-          wrap.replaceChildren(
+          slot.replaceChildren(
             el(
               'div',
               { class: 'auth-card' },
+              el('span', { class: 'success-mark' }, icon('check')),
               el('h1', {}, 'Solicitação enviada'),
               el('p', { class: 'form-info', role: 'status' }, data.message),
-              el('a', { class: 'btn', href: '#/login' }, 'Ir para o login'),
+              el('a', { class: 'btn primary block', href: '#/login' }, 'Ir para o login'),
             ),
           );
         } catch (err) {
-          error.textContent = err.message;
-          submit.disabled = false;
+          if (err.code === 'invalid_email_domain') {
+            setFieldState(emailRoot, 'invalid', err.message);
+            form.elements.email.focus();
+          } else {
+            error.textContent = err.message;
+          }
+          setBusy(submit, false, 'Solicitar cadastro');
         }
       },
     },
-    el('h1', {}, 'Solicitar cadastro'),
-    el('p', { class: 'auth-hint' }, 'O acesso é liberado depois que o administrador aprovar o seu cadastro.'),
-    field('Nome', 'name', { type: 'text', autocomplete: 'name', maxlength: '60' }),
-    field('E-mail', 'email', { type: 'email', autocomplete: 'username', maxlength: '254' }),
-    field('Senha (mínimo de 10 caracteres)', 'password', { type: 'password', autocomplete: 'new-password', minlength: '10', maxlength: '128' }),
-    field('Repita a senha', 'password2', { type: 'password', autocomplete: 'new-password', maxlength: '128' }),
+    ...cardHead('Solicitar cadastro', 'O acesso é liberado depois que o administrador aprovar o seu cadastro.'),
+    nameRoot,
+    emailRoot,
+    passRoot,
+    checklist.root,
+    repeatRoot,
     error,
     submit,
     el('p', { class: 'auth-alt' }, 'Já tem conta? ', el('a', { href: '#/login' }, 'Entrar')),
   );
-  wrap.append(form);
-  app.replaceChildren(wrap);
-  form.elements.name.focus();
+  slot.append(form);
+  app.replaceChildren(
+    authStage({ title: ['Peça o seu ', el('em', {}, 'acesso'), '.'], lede: 'Crie a sua conta em poucos passos. Assim que for aprovada, o catálogo completo é seu.' }, slot),
+  );
+  nameInput.focus();
 }
 
 // Atribuição exigida pelos termos de uso do TMDB: fica numa página de créditos, fora das telas principais.

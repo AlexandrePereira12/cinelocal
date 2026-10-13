@@ -12,6 +12,10 @@
  *   a pessoa recebe erro (nada fica pendente em silêncio).
  * - Limites: cadastro por IP, falhas de login por e-mail e por IP, decisão por IP e teto diário de avisos ao admin
  *   (evita transformar o cadastro público em spam na caixa do admin).
+ * - Cadastro: senha de 4+ caracteres com maiúscula, minúscula, número e um de @ _ . (regra definida pelo dono do
+ *   projeto, mais branda que a anterior de 10 caracteres). O login não aplica a regra, para contas antigas entrarem.
+ *   O domínio do e-mail precisa receber mensagens (email-domain.mjs); a consulta vem depois do limite por IP e só
+ *   reprova com "sem registro" explícito do DNS. A caixa em si não é provada: a aprovação do admin cobre isso.
  * - O link do e-mail usa SITE_URL (nunca o header Host, que permitiria injetar link de phishing) e abre uma
  *   página de confirmação; a decisão é um POST com token assinado (uso único: só vale com status `pending`).
  * - POST só com application/json e corpo pequeno; sem CORS (mesma origem); respostas `no-store`.
@@ -60,7 +64,7 @@ function json(status, body) {
 const unauthorized = () => new HttpError(401, 'Sessão inválida ou expirada', 'unauthorized');
 const tooMany = () => new HttpError(429, 'Muitas tentativas. Tente novamente em alguns minutos.', 'rate_limited');
 
-export function createHandler({ stores, catalog, mailer, env, now = Date.now }) {
+export function createHandler({ stores, catalog, mailer, acceptsMail, env, now = Date.now }) {
   const nowSeconds = () => Math.floor(now() / 1000);
   const nowIso = () => new Date(now()).toISOString();
   const userId = (email) => `u_${sha256Hex(email).slice(0, 40)}`;
@@ -156,10 +160,16 @@ export function createHandler({ stores, catalog, mailer, env, now = Date.now }) 
     const body = await readJson(req);
     const name = v.cleanName(body.name);
     const email = v.normalizeEmail(body.email);
-    if (!name || !email || !v.validPassword(body.password)) {
-      throw v.badRequest(`Informe nome, e-mail válido e senha de ${v.PASSWORD_MIN} a ${v.PASSWORD_MAX} caracteres`);
+    if (!name) throw v.badRequest('Informe um nome de 2 a 60 caracteres');
+    if (!email) throw v.badRequest('Informe um e-mail válido');
+    if (!v.validPassword(body.password)) {
+      throw v.badRequest(`A senha precisa ter de ${v.PASSWORD_MIN} a ${v.PASSWORD_MAX} caracteres, com letra maiúscula, minúscula, número e um símbolo (@, _ ou .)`);
     }
     await guard('reg', ip, REGISTER_PER_IP);
+    // Depois do limite por IP: cada consulta de DNS é custo nosso. Não depende de o e-mail já ter conta (sem enumeração).
+    if (!(await acceptsMail(v.emailDomain(email)))) {
+      throw new HttpError(400, 'Esse e-mail não parece real: o domínio não recebe mensagens. Confira se digitou certo.', 'invalid_email_domain');
+    }
 
     const passHash = await hashPassword(body.password); // sempre, para o tempo não revelar e-mail já cadastrado
     const id = userId(email);

@@ -7,6 +7,7 @@
 
 import catalogData from '../data/catalogo.mjs';
 import { createCatalog } from '../lib/catalog.mjs';
+import { createDomainChecker } from '../lib/email-domain.mjs';
 import { createHandler } from '../lib/handler.mjs';
 import { createMailer } from '../lib/mailer.mjs';
 import { blobsStores } from '../lib/store.mjs';
@@ -18,6 +19,7 @@ export default async (req, context) => {
     stores: blobsStores(),
     catalog: createCatalog({ data: catalogData }),
     mailer: createMailer(process.env),
+    acceptsMail: createDomainChecker(),
     env: process.env,
   });
   return handler(req, context);
