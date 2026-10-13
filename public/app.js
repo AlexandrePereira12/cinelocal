@@ -260,6 +260,8 @@ const ICONS = {
   play: ['M6 4l14 8-14 8z'],
   star: ['M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'],
   bookmark: ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'],
+  tv: ['M4 7h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z', 'M17 2l-5 5-5-5'],
+  x: ['M18 6L6 18', 'M6 6l12 12'],
 };
 
 // SVG inline montado por DOM (a CSP do site não aceita atributo style nem imagem de outra origem).
@@ -610,6 +612,123 @@ function renderCredits() {
   );
 }
 
+// --- janela modal: base do painel de instalação do app e do painel de transmissão para a TV ---
+
+function guideDetails(guide, open = false) {
+  return el('details', { class: 'guide', open }, el('summary', {}, guide.title), el('ol', {}, ...guide.steps.map((step) => el('li', {}, step))), guide.note && el('p', { class: 'guide-note' }, guide.note));
+}
+
+function showDialog(title, ...content) {
+  const dialog = el(
+    'dialog',
+    { class: 'modal', 'aria-labelledby': 'modal-title' },
+    el(
+      'div',
+      { class: 'modal-body' },
+      el(
+        'div',
+        { class: 'modal-head' },
+        el('h2', { id: 'modal-title' }, title),
+        el('button', { class: 'modal-close', type: 'button', 'aria-label': 'Fechar', onclick: () => dialog.close() }, icon('x')),
+      ),
+      ...content,
+    ),
+  );
+  dialog.addEventListener('close', () => dialog.remove());
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close(); // clique no fundo escurecido
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+// --- instalação como app (PWA): o ícone no fim do cabeçalho já conduz a instalação ---
+// Se o navegador ofereceu o prompt nativo (`beforeinstallprompt`), o clique instala na hora; sem ele (iPhone/Safari,
+// Firefox, ou o Chrome ainda não liberou) abre um painel só com os passos do aparelho da pessoa.
+
+const installApp = document.getElementById('install-app');
+let installPrompt = null;
+
+function isInstalled() {
+  return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+function detectPlatform() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  return /Android/.test(ua) ? 'android' : 'desktop';
+}
+
+installApp.hidden = isInstalled();
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  installApp.hidden = true;
+});
+
+const INSTALL_GUIDES = [
+  {
+    id: 'android',
+    title: 'Android (Chrome)',
+    steps: [
+      'Abra o Cine Local no Chrome.',
+      'Toque nos três pontinhos (⋮), no canto superior direito.',
+      'Toque em “Instalar app” (em alguns aparelhos aparece como “Adicionar à tela inicial”).',
+      'Confirme em “Instalar”. O ícone aparece na sua tela inicial.',
+    ],
+  },
+  {
+    id: 'ios',
+    title: 'iPhone e iPad (Safari)',
+    steps: [
+      'Abra o Cine Local no Safari.',
+      'Toque no botão Compartilhar (o quadrado com uma seta para cima).',
+      'Role a lista e toque em “Adicionar à Tela de Início”.',
+      'Toque em “Adicionar”. O ícone aparece na tela inicial.',
+    ],
+  },
+  {
+    id: 'desktop',
+    title: 'Computador (Chrome ou Edge)',
+    steps: [
+      'Abra o Cine Local no Chrome ou no Edge.',
+      'Clique no ícone de instalar, na ponta direita da barra de endereço (um monitor com uma seta para baixo).',
+      'Clique em “Instalar”. O app abre numa janela própria e ganha atalho no menu de aplicativos.',
+    ],
+    note: 'O Firefox no computador não instala sites como app.',
+  },
+];
+
+function openInstallDialog() {
+  const mine = INSTALL_GUIDES.find((guide) => guide.id === detectPlatform());
+  showDialog(
+    'Instalar o Cine Local',
+    el('p', { class: 'modal-intro' }, 'Sem loja de aplicativos: o app ganha ícone na tela inicial e abre em tela cheia. Siga os passos:'),
+    el('h3', { class: 'modal-subtitle' }, mine.title),
+    el('ol', { class: 'modal-steps' }, ...mine.steps.map((step) => el('li', {}, step))),
+    mine.note && el('p', { class: 'modal-note' }, mine.note),
+    el('h3', { class: 'modal-subtitle' }, 'Outro aparelho?'),
+    ...INSTALL_GUIDES.filter((guide) => guide !== mine).map((guide) => guideDetails(guide)),
+  );
+}
+
+installApp.addEventListener('click', async () => {
+  if (!installPrompt) return openInstallDialog();
+  const prompt = installPrompt;
+  installPrompt = null; // o evento só pode ser usado uma vez
+  try {
+    await prompt.prompt();
+  } catch {
+    openInstallDialog();
+  }
+});
+
 // Escolha dos 2 gêneros de filme favoritos: obrigatória para quem ainda não escolheu (novo ou antigo), editável depois.
 async function renderGenres(token) {
   app.replaceChildren(spinner());
@@ -860,6 +979,89 @@ async function renderLibrary(token) {
   }
 }
 
+// --- transmitir para a TV ---
+// O player é um iframe de outro site: a página não enxerga o <video> nem a URL do vídeo, então não há como usar
+// o Google Cast SDK nem a Remote Playback API. A transmissão é feita pelo espelhamento do navegador/aparelho
+// (Chromecast pelo Chrome/Edge, AirPlay, Smart View, HDMI), e aqui só se guia a pessoa até lá.
+
+const CAST_GUIDES = [
+  {
+    id: 'chrome',
+    title: 'Chromecast ou TV com Chromecast (Chrome ou Edge no computador)',
+    steps: [
+      'Abra este filme no Chrome ou no Edge, com o computador na mesma rede Wi-Fi da TV.',
+      'Chrome: menu (⋮) → “Salvar e compartilhar” → “Transmitir…”. Edge: menu (…) → “Mais ferramentas” → “Transmitir mídia para o dispositivo”.',
+      'Escolha a sua TV na lista. Em “Fontes”, selecione “Transmitir guia” para o som ir junto.',
+      'Dê play e coloque o player em tela cheia. Para parar, clique no ícone de transmissão na barra do navegador e em “Parar”.',
+    ],
+  },
+  {
+    id: 'android',
+    title: 'Celular Android (Transmitir, Smart View ou Espelhar tela)',
+    steps: [
+      'Deixe o celular na mesma rede Wi-Fi da TV.',
+      'Deslize a barra de atalhos e toque em “Transmitir”, “Smart View” ou “Espelhar tela” (o nome muda conforme a marca).',
+      'Escolha a sua TV.',
+      'Abra este filme no navegador, dê play e gire o celular para tela cheia.',
+    ],
+  },
+  {
+    id: 'airplay',
+    title: 'iPhone, iPad e Mac (AirPlay)',
+    steps: [
+      'Deixe o aparelho na mesma rede Wi-Fi da Apple TV ou da TV com AirPlay.',
+      'iPhone e iPad: abra a Central de Controle e toque em “Espelhar Tela”. Mac: Central de Controle → “Espelhamento de Tela”.',
+      'Escolha a sua TV (e digite o código que aparecer nela, se pedir).',
+      'Abra este filme, dê play e use a tela cheia.',
+    ],
+  },
+  {
+    id: 'other',
+    title: 'Outras formas (cabo HDMI, Miracast e navegador da TV)',
+    steps: [
+      'Cabo HDMI: ligue o computador ou o celular (com adaptador) à TV e escolha a entrada HDMI. É a opção mais estável.',
+      'Windows: tecle Windows + K para transmitir a tela para uma TV com Miracast.',
+      'Smart TV com navegador: abra o navegador da TV, digite o endereço abaixo, entre na sua conta e abra o filme.',
+    ],
+  },
+];
+
+function castGuideFor() {
+  const ua = navigator.userAgent;
+  const platform = detectPlatform();
+  if (platform === 'ios') return 'airplay';
+  if (/Macintosh/.test(ua) && /Safari/.test(ua) && !/Chrome|Chromium|Edg|OPR/.test(ua)) return 'airplay';
+  return platform === 'android' ? 'android' : 'chrome';
+}
+
+function openCastDialog() {
+  const address = location.href;
+  const copyLabel = 'Copiar link';
+  const link = el('input', { class: 'cast-link', type: 'text', readonly: true, value: address, 'aria-label': 'Endereço deste filme' });
+  const copy = el('button', { class: 'btn small', type: 'button' }, copyLabel);
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(address);
+      copy.textContent = 'Copiado!';
+    } catch {
+      link.select();
+      copy.textContent = 'Copie com Ctrl+C';
+    }
+    setTimeout(() => {
+      copy.textContent = copyLabel;
+    }, 2500);
+  });
+
+  const preferred = castGuideFor();
+  showDialog(
+    'Transmitir para a TV',
+    el('p', { class: 'modal-intro' }, 'O filme toca num player de outro site dentro do Cine Local, então a transmissão é feita pelo espelhamento do seu navegador ou aparelho, e não por um botão dentro do player. Funciona na mesma rede Wi-Fi da TV.'),
+    ...CAST_GUIDES.map((guide) => guideDetails(guide, guide.id === preferred)),
+    el('p', { class: 'modal-tip' }, 'Tela preta ou sem som? Alguns players bloqueiam o espelhamento da aba. No Chrome, em “Fontes”, escolha “Transmitir tela” em vez de “Transmitir guia”.'),
+    el('div', { class: 'cast-link-row' }, link, copy),
+  );
+}
+
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const isTv = type === 'tv';
   const known = meta[`${type}:${id}`];
@@ -879,6 +1081,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const message = el('p', { class: 'form-error', role: 'alert' });
 
   const openLink = el('a', { class: 'btn primary', target: '_blank', rel: 'noopener noreferrer' }, '▶ Assistir em nova aba');
+  const castBtn = el('button', { class: 'btn', type: 'button', onclick: openCastDialog }, icon('tv'), 'Transmitir para a TV');
   const reloadBtn = el('button', { class: 'btn', type: 'button', onclick: () => loadFrame() }, 'Recarregar player');
   const doneBtn = el('button', { class: 'btn', type: 'button', onclick: () => toggleDone() }, 'Marcar como assistido');
   const page = el(
@@ -888,7 +1091,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       'div',
       { class: 'watch-head' },
       el('div', {}, heading, subtitle),
-      el('div', { class: 'controls' }, openLink, doneBtn, reloadBtn),
+      el('div', { class: 'controls' }, openLink, castBtn, doneBtn, reloadBtn),
     ),
     player,
   );
@@ -1134,6 +1337,14 @@ document.getElementById('logout').addEventListener('click', () => {
 });
 
 window.addEventListener('hashchange', route);
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* sem service worker o site funciona igual; só não é oferecido como app */
+    });
+  });
+}
 
 async function boot() {
   updateChrome();

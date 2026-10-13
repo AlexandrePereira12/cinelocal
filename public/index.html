@@ -6,6 +6,11 @@
   <meta name="robots" content="noindex, nofollow">
   <title>Cine Local</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e50914'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#0b0b10">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cine Local">
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="anon">
@@ -25,6 +30,7 @@
     <div class="user" id="user">
       <span class="user-name" id="user-name"></span>
       <button class="btn small" id="logout" type="button">Sair</button>
+      <button class="install-app" id="install-app" type="button" aria-label="Baixar o app" title="Baixar o app"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></button>
     </div>
   </header>
   <main id="app" aria-live="polite"></main>

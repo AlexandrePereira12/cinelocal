@@ -10,7 +10,7 @@
 [[headers]]
   for = "/*"
   [headers.values]
-    Content-Security-Policy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://image.tmdb.org; connect-src 'self'; frame-src https://embedplayapi.top; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    Content-Security-Policy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://image.tmdb.org; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src https://embedplayapi.top; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     X-Content-Type-Options = "nosniff"
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
