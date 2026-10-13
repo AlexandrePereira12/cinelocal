@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { signToken } from '../netlify/lib/auth.mjs';
-import { ADMIN_EMAIL, AUTH_SECRET, SITE_URL, makeApp } from './helpers.mjs';
+import { hashPassword, sha256Hex, signToken } from '../netlify/lib/auth.mjs';
+import { ADMIN_EMAIL, AUTH_SECRET, DOMAIN_WITHOUT_MAIL, SITE_URL, makeApp } from './helpers.mjs';
 
 const PROTECTED = [
   ['GET', '/api/auth/me'],
@@ -66,7 +66,7 @@ test('rota inexistente e método errado', async () => {
 
 test('cadastro valida dados e avisa o admin sem expor o e-mail dele', async () => {
   const app = makeApp();
-  const ok = { name: '  Ana   Souza ', email: 'ANA@Exemplo.com ', password: 'senha-bem-longa-1' };
+  const ok = { name: '  Ana   Souza ', email: 'ANA@Exemplo.com ', password: 'Senha_bem_longa_1' };
 
   for (const bad of [{ ...ok, name: 'A' }, { ...ok, email: 'sem-arroba' }, { ...ok, password: 'curta' }, { ...ok, password: 123 }, {}]) {
     assert.equal((await app.call('POST', '/api/auth/register', { body: bad })).status, 400);
@@ -82,18 +82,82 @@ test('cadastro valida dados e avisa o admin sem expor o e-mail dele', async () =
   assert.ok(!JSON.stringify(app.mails).includes(ADMIN_EMAIL));
 });
 
+test('cadastro exige senha de 4+ caracteres com maiúscula, minúscula, número e símbolo (@ _ .)', async () => {
+  const app = makeApp();
+  const body = { name: 'Ana', email: 'ana@exemplo.com' };
+  const register = (password) => app.call('POST', '/api/auth/register', { body: { ...body, password } });
+
+  const rejected = {
+    'curta demais (3)': 'Ab1',
+    'sem maiúscula': 'abc1@',
+    'sem minúscula': 'ABC1@',
+    'sem número': 'Abc@x',
+    'sem símbolo': 'Abc12',
+    'símbolo fora da lista': 'Abc1!',
+    'acima do limite': `Aa1_${'x'.repeat(125)}`,
+  };
+  for (const [motivo, password] of Object.entries(rejected)) {
+    const res = await register(password);
+    assert.equal(res.status, 400, motivo);
+    assert.match(res.body.error, /maiúscula, minúscula, número e um símbolo/, motivo);
+  }
+  assert.equal(app.mails.length, 0);
+
+  for (const [i, password] of ['Ab1@', 'aB2_', 'Zz9.', 'Á1b_', `Aa1_${'x'.repeat(124)}`].entries()) {
+    const res = await app.call('POST', '/api/auth/register', { body: { ...body, email: `ok${i}@exemplo.com`, password } });
+    assert.equal(res.status, 202, password);
+  }
+});
+
+test('cadastro recusa e-mail cujo domínio não recebe mensagens', async () => {
+  const app = makeApp();
+  const body = { name: 'Ana', email: `ana@${DOMAIN_WITHOUT_MAIL}`, password: 'Senha_bem_longa_1' };
+
+  const res = await app.call('POST', '/api/auth/register', { body });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'invalid_email_domain');
+  assert.equal(app.mails.length, 0);
+  assert.equal(app.stores.users.data.size, 0);
+  assert.deepEqual(app.domainChecks, [DOMAIN_WITHOUT_MAIL]);
+
+  assert.equal((await app.call('POST', '/api/auth/register', { body: { ...body, email: 'ana@exemplo.com' } })).status, 202);
+});
+
+test('o DNS só é consultado depois da validação básica e do limite por IP', async () => {
+  const app = makeApp();
+  await app.call('POST', '/api/auth/register', { body: { name: 'Ana', email: 'sem-arroba', password: 'Senha_bem_longa_1' } });
+  await app.call('POST', '/api/auth/register', { body: { name: 'Ana', email: 'ana@exemplo.com', password: 'fraca' } });
+  assert.deepEqual(app.domainChecks, [], 'dado inválido não custa consulta de DNS');
+
+  for (let i = 0; i < 5; i++) await app.call('POST', '/api/auth/register', { body: { name: 'Ana', email: `r${i}@exemplo.com`, password: 'Senha_bem_longa_1' }, ip: '198.51.100.20' });
+  assert.equal(app.domainChecks.length, 5);
+  assert.equal((await app.call('POST', '/api/auth/register', { body: { name: 'Ana', email: 'r9@exemplo.com', password: 'Senha_bem_longa_1' }, ip: '198.51.100.20' })).status, 429);
+  assert.equal(app.domainChecks.length, 5, 'bloqueado por IP não consulta DNS');
+});
+
+test('login não aplica a regra de senha do cadastro (contas antigas continuam entrando)', async () => {
+  const app = makeApp();
+  const legacy = 'senha-antiga-sem-simbolo-1';
+  const { email } = await app.registerAndApprove('velho@exemplo.com');
+  const entry = await app.stores.users.get(`u_${sha256Hex(email).slice(0, 40)}`);
+  await app.stores.users.put(entry.value.id, { ...entry.value, passHash: await hashPassword(legacy) }, entry.etag);
+
+  const res = await app.call('POST', '/api/auth/login', { body: { email, password: legacy } });
+  assert.equal(res.status, 200);
+});
+
 test('cadastro repetido responde igual e não reenvia e-mail', async () => {
   const app = makeApp();
-  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' };
   const first = await app.call('POST', '/api/auth/register', { body });
-  const again = await app.call('POST', '/api/auth/register', { body: { ...body, name: 'Outra Pessoa', password: 'outra-senha-longa-2' } });
+  const again = await app.call('POST', '/api/auth/register', { body: { ...body, name: 'Outra Pessoa', password: 'Outra_senha_longa_2' } });
   assert.deepEqual(again, first);
   assert.equal(app.mails.length, 1);
 });
 
 test('se o aviso ao admin falhar, o cadastro é desfeito e dá erro', async () => {
   const app = makeApp({ mailFails: true });
-  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' };
   const res = await app.call('POST', '/api/auth/register', { body });
   assert.equal(res.status, 503);
   assert.equal(app.stores.users.data.size, 0);
@@ -101,7 +165,7 @@ test('se o aviso ao admin falhar, o cadastro é desfeito e dá erro', async () =
 
 test('login: erro genérico, pendente só após senha correta, aprovação libera', async () => {
   const app = makeApp();
-  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' };
   await app.call('POST', '/api/auth/register', { body });
 
   const unknown = await app.call('POST', '/api/auth/login', { body: { email: 'ninguem@exemplo.com', password: 'qualquer-senha-1' } });
@@ -123,7 +187,7 @@ test('login: erro genérico, pendente só após senha correta, aprovação liber
 
 test('decisão: prévia sem mudar estado, uso único, recusa bloqueia', async () => {
   const app = makeApp();
-  const body = { name: 'Bia', email: 'bia@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Bia', email: 'bia@exemplo.com', password: 'Senha_bem_longa_1' };
   await app.call('POST', '/api/auth/register', { body });
   const reject = app.mails[0].rejectUrl.split('/#/decisao/')[1];
   const approve = app.mails[0].approveUrl.split('/#/decisao/')[1];
@@ -146,7 +210,7 @@ test('decisão: token inválido, expirado, de outro tipo ou GET', async () => {
   const bad = [undefined, 'x', token, 'a.b.c'];
   for (const t of bad) assert.equal((await app.call('POST', '/api/auth/decision', { body: { token: t } })).status, 400);
 
-  const body = { name: 'Caio', email: 'caio@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Caio', email: 'caio@exemplo.com', password: 'Senha_bem_longa_1' };
   await app.call('POST', '/api/auth/register', { body });
   const link = app.mails.at(-1).approveUrl.split('/#/decisao/')[1];
   app.clock.ms += 8 * 24 * 3600 * 1000;
@@ -184,13 +248,13 @@ test('limite de tentativas de login por e-mail e por IP', async () => {
 
 test('limite de cadastros por IP e teto diário de avisos', async () => {
   const app = makeApp();
-  const reg = (i, ip) => app.call('POST', '/api/auth/register', { body: { name: 'Pessoa', email: `p${i}@exemplo.com`, password: 'senha-bem-longa-1' }, ip });
+  const reg = (i, ip) => app.call('POST', '/api/auth/register', { body: { name: 'Pessoa', email: `p${i}@exemplo.com`, password: 'Senha_bem_longa_1' }, ip });
   for (let i = 0; i < 5; i++) assert.equal((await reg(i, '198.51.100.9')).status, 202);
   assert.equal((await reg(99, '198.51.100.9')).status, 429);
 
   const capped = makeApp();
   let last;
-  for (let i = 0; i < 31; i++) last = await capped.call('POST', '/api/auth/register', { body: { name: 'Pessoa', email: `q${i}@exemplo.com`, password: 'senha-bem-longa-1' }, ip: `198.51.100.${i}` });
+  for (let i = 0; i < 31; i++) last = await capped.call('POST', '/api/auth/register', { body: { name: 'Pessoa', email: `q${i}@exemplo.com`, password: 'Senha_bem_longa_1' }, ip: `198.51.100.${i}` });
   assert.equal(last.status, 503);
   assert.equal(capped.mails.length, 30);
 });
@@ -205,7 +269,7 @@ test('corpo: content-type, tamanho e JSON', async () => {
 });
 
 test('sem AUTH_SECRET ou SITE_URL o serviço falha fechado', async () => {
-  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Ana', email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' };
   assert.equal((await makeApp({ env: { AUTH_SECRET: 'curto' } }).call('POST', '/api/auth/login', { body })).status, 500);
   assert.equal((await makeApp({ env: { SITE_URL: 'http://site-publico.invalid' } }).call('POST', '/api/auth/register', { body })).status, 500);
   assert.equal((await makeApp({ env: { SITE_URL: undefined } }).call('POST', '/api/auth/register', { body })).status, 500);
@@ -290,7 +354,7 @@ test('histórico tem teto e descarta os mais antigos', async () => {
 
 test('pendente cujo aviso venceu recebe novo e-mail ao repetir o cadastro', async () => {
   const app = makeApp();
-  const body = { name: 'Dani', email: 'dani@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Dani', email: 'dani@exemplo.com', password: 'Senha_bem_longa_1' };
   const DAY = 24 * 3600 * 1000;
 
   await app.call('POST', '/api/auth/register', { body });
@@ -302,7 +366,7 @@ test('pendente cujo aviso venceu recebe novo e-mail ao repetir o cadastro', asyn
   const old = app.mails[0].approveUrl.split('/#/decisao/')[1];
   assert.equal((await app.call('POST', '/api/auth/decision', { body: { token: old } })).status, 400);
 
-  const again = await app.call('POST', '/api/auth/register', { body: { ...body, name: 'Outro Nome', password: 'outra-senha-longa-2' } });
+  const again = await app.call('POST', '/api/auth/register', { body: { ...body, name: 'Outro Nome', password: 'Outra_senha_longa_2' } });
   assert.equal(again.status, 202);
   assert.equal(app.mails.length, 2);
   assert.equal(app.mails[1].name, 'Dani', 'repetir o cadastro não altera os dados guardados');
@@ -315,7 +379,7 @@ test('pendente cujo aviso venceu recebe novo e-mail ao repetir o cadastro', asyn
 
 test('reenvio que falha não apaga o cadastro pendente', async () => {
   const app = makeApp();
-  const body = { name: 'Edu', email: 'edu@exemplo.com', password: 'senha-bem-longa-1' };
+  const body = { name: 'Edu', email: 'edu@exemplo.com', password: 'Senha_bem_longa_1' };
   await app.call('POST', '/api/auth/register', { body });
 
   app.clock.ms += 8 * 24 * 3600 * 1000;
@@ -360,7 +424,7 @@ test('gêneros favoritos: usuário novo precisa escolher 2, salva, e o perfil re
 
   const after = await app.call('GET', '/api/auth/me', { token });
   assert.deepEqual(after.body, { name: 'Ana Souza', genres: [{ id: 18, name: 'Drama' }, { id: 28, name: 'Ação' }], needsGenres: false });
-  const login = await app.call('POST', '/api/auth/login', { body: { email: 'ana@exemplo.com', password: 'senha-bem-longa-1' } });
+  const login = await app.call('POST', '/api/auth/login', { body: { email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' } });
   assert.equal(login.body.user.needsGenres, false, 'o login também já traz os gêneros');
 
   const changed = await app.call('POST', '/api/me/preferences', { token, body: { genres: [35, 28] } });
@@ -410,7 +474,7 @@ test('gêneros favoritos: catálogo sem gêneros não obriga ninguém e recusa s
 test('gêneros favoritos: são por usuário e nunca aparecem no registro de outro', async () => {
   const app = makeApp();
   const a = await app.registerAndApprove('a@exemplo.com');
-  const b = await app.registerAndApprove('b@exemplo.com', 'senha-bem-longa-1', 'Bia');
+  const b = await app.registerAndApprove('b@exemplo.com', 'Senha_bem_longa_1', 'Bia');
   await app.call('POST', '/api/me/preferences', { token: a.token, body: { genres: [28, 18] } });
   assert.equal((await app.call('GET', '/api/auth/me', { token: b.token })).body.genres, null);
 });
@@ -444,7 +508,7 @@ test('recomendações: o histórico do usuário (filme e série) é passado para
 test('recomendações: cada usuário vê só o que o próprio histórico exclui', async () => {
   const app = makeApp();
   const a = await app.registerAndApprove('a@exemplo.com');
-  const b = await app.registerAndApprove('b@exemplo.com', 'senha-bem-longa-1', 'Bia');
+  const b = await app.registerAndApprove('b@exemplo.com', 'Senha_bem_longa_1', 'Bia');
   for (const user of [a, b]) await app.call('POST', '/api/me/preferences', { token: user.token, body: { genres: [28, 18] } });
   await app.call('POST', '/api/play', { token: a.token, body: { type: 'movie', id: '10', title: 'Só da Ana' } });
   await app.call('GET', '/api/me/recommendations', { token: b.token });

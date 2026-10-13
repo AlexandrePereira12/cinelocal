@@ -3,7 +3,10 @@ import { HttpError } from './errors.mjs';
 const EMAIL_RE = /^[^\s@<>()[\]\\,;:"]{1,64}@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
 
-export const PASSWORD_MIN = 10;
+// Regra pedida para o cadastro: mínimo curto, mas com maiúscula, minúscula, número e um destes símbolos: @ _ .
+// Só vale ao criar conta; o login não aplica a regra para não trancar quem já tem senha antiga.
+// A tela de cadastro (public/app.js, PASSWORD_RULES) espelha estas regras para avisar antes do envio.
+export const PASSWORD_MIN = 4;
 export const PASSWORD_MAX = 128;
 
 export function normalizeEmail(value) {
@@ -25,7 +28,20 @@ export function cleanTitle(value) {
 }
 
 export function validPassword(value) {
-  return typeof value === 'string' && value.length >= PASSWORD_MIN && value.length <= PASSWORD_MAX;
+  return (
+    typeof value === 'string' &&
+    value.length >= PASSWORD_MIN &&
+    value.length <= PASSWORD_MAX &&
+    /\p{Lu}/u.test(value) &&
+    /\p{Ll}/u.test(value) &&
+    /[0-9]/.test(value) &&
+    /[@_.]/.test(value)
+  );
+}
+
+// Domínio de um e-mail já normalizado (a parte depois do último @).
+export function emailDomain(email) {
+  return email.slice(email.lastIndexOf('@') + 1);
 }
 
 export function validType(value) {

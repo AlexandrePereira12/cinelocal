@@ -4,6 +4,7 @@ import { createHandler } from '../netlify/lib/handler.mjs';
 export const ADMIN_EMAIL = 'admin-secreto@exemplo.invalid';
 export const AUTH_SECRET = 'x'.repeat(48);
 export const SITE_URL = 'https://cine.exemplo.invalid';
+export const DOMAIN_WITHOUT_MAIL = 'sem-email.exemplo.com';
 
 export function memoryStore() {
   const data = new Map();
@@ -80,7 +81,12 @@ export function makeApp({ env: envOverrides = {}, mailFails = false, genres = tr
   };
   const clock = { ms: Date.parse('2026-10-11T12:00:00Z') };
   const env = { AUTH_SECRET, SITE_URL, ADMIN_EMAIL, ...envOverrides };
-  const handle = createHandler({ stores, catalog, mailer, env, now: () => clock.ms });
+  const domainChecks = [];
+  const acceptsMail = async (domain) => {
+    domainChecks.push(domain);
+    return domain !== DOMAIN_WITHOUT_MAIL;
+  };
+  const handle = createHandler({ stores, catalog, mailer, acceptsMail, env, now: () => clock.ms });
 
   async function call(method, path, { body, token, ip = '203.0.113.7', headers = {}, raw, contentType = 'application/json' } = {}) {
     const init = { method, headers: { ...headers } };
@@ -101,7 +107,7 @@ export function makeApp({ env: envOverrides = {}, mailFails = false, genres = tr
     return { status: res.status, body: text ? JSON.parse(text) : null };
   }
 
-  async function registerAndApprove(email = 'ana@exemplo.com', password = 'senha-bem-longa-1', name = 'Ana Souza') {
+  async function registerAndApprove(email = 'ana@exemplo.com', password = 'Senha_bem_longa_1', name = 'Ana Souza') {
     const reg = await call('POST', '/api/auth/register', { body: { name, email, password } });
     assert.equal(reg.status, 202);
     const mail = mails.at(-1);
@@ -113,5 +119,5 @@ export function makeApp({ env: envOverrides = {}, mailFails = false, genres = tr
     return { token: login.body.token, email, password };
   }
 
-  return { call, stores, catalog, mails, clock, env, registerAndApprove };
+  return { call, stores, catalog, mails, domainChecks, clock, env, registerAndApprove };
 }
