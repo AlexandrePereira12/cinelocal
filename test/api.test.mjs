@@ -12,6 +12,9 @@ const PROTECTED = [
   ['POST', '/api/play', { type: 'movie', id: '1' }],
   ['POST', '/api/me/done', { type: 'movie', id: '1', done: true }],
   ['GET', '/api/me/library'],
+  ['GET', '/api/me/preferences'],
+  ['POST', '/api/me/preferences', { genres: [28, 18] }],
+  ['GET', '/api/me/recommendations'],
 ];
 
 const seconds = (app) => Math.floor(app.clock.ms / 1000);
@@ -57,6 +60,8 @@ test('rota inexistente e método errado', async () => {
   assert.equal((await app.call('GET', '/api/play')).status, 405);
   assert.equal((await app.call('DELETE', '/api/me/library')).status, 405);
   assert.equal((await app.call('DELETE', '/api/me/nada')).status, 404);
+  assert.equal((await app.call('DELETE', '/api/me/preferences')).status, 405);
+  assert.equal((await app.call('PUT', '/api/me/preferences')).status, 405);
 });
 
 test('cadastro valida dados e avisa o admin sem expor o e-mail dele', async () => {
@@ -113,7 +118,7 @@ test('login: erro genérico, pendente só após senha correta, aprovação liber
   const ok = await app.call('POST', '/api/auth/login', { body: { email: body.email, password: body.password } });
   assert.equal(ok.status, 200);
   assert.deepEqual(Object.keys(ok.body).sort(), ['token', 'user']);
-  assert.deepEqual(ok.body.user, { name: 'Ana' });
+  assert.deepEqual(ok.body.user, { name: 'Ana', genres: null, needsGenres: true });
 });
 
 test('decisão: prévia sem mudar estado, uso único, recusa bloqueia', async () => {
@@ -335,4 +340,113 @@ test('play usa o metadado do catálogo do servidor e ignora o que o navegador ma
 
   const deepLink = await app.call('POST', '/api/play', { token, body: { type: 'movie', id: '777' } });
   assert.equal(deepLink.body.title, 'Do Catálogo', 'link direto também ganha o título certo');
+});
+
+test('gêneros favoritos: usuário novo precisa escolher 2, salva, e o perfil reflete', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+
+  const before = await app.call('GET', '/api/auth/me', { token });
+  assert.deepEqual(before.body, { name: 'Ana Souza', genres: null, needsGenres: true });
+
+  const prefs = await app.call('GET', '/api/me/preferences', { token });
+  assert.deepEqual(prefs.body.options, [{ id: 28, name: 'Ação' }, { id: 35, name: 'Comédia' }, { id: 18, name: 'Drama' }]);
+  assert.equal(prefs.body.needsGenres, true);
+
+  const saved = await app.call('POST', '/api/me/preferences', { token, body: { genres: [18, 28] } });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.body.genres, [{ id: 18, name: 'Drama' }, { id: 28, name: 'Ação' }]);
+  assert.equal(saved.body.needsGenres, false);
+
+  const after = await app.call('GET', '/api/auth/me', { token });
+  assert.deepEqual(after.body, { name: 'Ana Souza', genres: [{ id: 18, name: 'Drama' }, { id: 28, name: 'Ação' }], needsGenres: false });
+  const login = await app.call('POST', '/api/auth/login', { body: { email: 'ana@exemplo.com', password: 'senha-bem-longa-1' } });
+  assert.equal(login.body.user.needsGenres, false, 'o login também já traz os gêneros');
+
+  const changed = await app.call('POST', '/api/me/preferences', { token, body: { genres: [35, 28] } });
+  assert.deepEqual(changed.body.genres.map((g) => g.id), [35, 28], 'dá para trocar depois');
+});
+
+test('gêneros favoritos: valida exatamente 2 ids distintos e da lista', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  for (const genres of [[], [28], [28, 18, 35], [28, 28], [28, 999], ['28', '18'], [28, null], [1.5, 28], 'Ação', null, undefined]) {
+    const res = await app.call('POST', '/api/me/preferences', { token, body: { genres } });
+    assert.equal(res.status, 400, JSON.stringify(genres));
+  }
+  assert.equal((await app.call('POST', '/api/me/preferences', { token, body: {} })).status, 400);
+  assert.equal((await app.call('GET', '/api/auth/me', { token })).body.genres, null, 'nada foi salvo');
+});
+
+test('gêneros favoritos: usuário antigo (registro sem o campo) também precisa escolher no próximo acesso', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  for (const [key, entry] of app.stores.users.data) {
+    const { genres, ...old } = entry.value;
+    app.stores.users.data.set(key, { ...entry, value: old });
+  }
+  assert.equal((await app.call('GET', '/api/auth/me', { token })).body.needsGenres, true);
+});
+
+test('gêneros favoritos: id salvo que saiu do catálogo volta a pedir a escolha', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
+  for (const [key, entry] of app.stores.users.data) app.stores.users.data.set(key, { ...entry, value: { ...entry.value, genres: [28, 777] } });
+  const me = await app.call('GET', '/api/auth/me', { token });
+  assert.deepEqual(me.body, { name: 'Ana Souza', genres: null, needsGenres: true });
+});
+
+test('gêneros favoritos: catálogo sem gêneros não obriga ninguém e recusa salvar', async () => {
+  const app = makeApp({ genres: false });
+  const { token } = await app.registerAndApprove();
+  assert.deepEqual((await app.call('GET', '/api/auth/me', { token })).body, { name: 'Ana Souza', genres: null, needsGenres: false });
+  assert.equal((await app.call('GET', '/api/me/preferences', { token })).body.options.length, 0);
+  const res = await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'genres_unavailable');
+});
+
+test('gêneros favoritos: são por usuário e nunca aparecem no registro de outro', async () => {
+  const app = makeApp();
+  const a = await app.registerAndApprove('a@exemplo.com');
+  const b = await app.registerAndApprove('b@exemplo.com', 'senha-bem-longa-1', 'Bia');
+  await app.call('POST', '/api/me/preferences', { token: a.token, body: { genres: [28, 18] } });
+  assert.equal((await app.call('GET', '/api/auth/me', { token: b.token })).body.genres, null);
+});
+
+test('recomendações: sem gêneros escolhidos não há fileiras; com gêneros vêm na ordem escolhida', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  assert.deepEqual((await app.call('GET', '/api/me/recommendations', { token })).body, { rows: [] });
+
+  await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
+  const res = await app.call('GET', '/api/me/recommendations', { token });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.rows.map((row) => [row.id, row.title]), [['gosto-1', 'Mais de Ação'], ['gosto-2', 'Mais de Drama']], 'a lista "mix" vazia some');
+  assert.deepEqual(app.catalog.calls.at(-1), ['recommend', [28, 18], []]);
+
+  await app.call('POST', '/api/me/preferences', { token, body: { genres: [18, 28] } });
+  const swapped = await app.call('GET', '/api/me/recommendations', { token });
+  assert.deepEqual(swapped.body.rows.map((row) => row.title), ['Mais de Drama', 'Mais de Ação'], 'o 1º gênero escolhido vira a 1ª fileira');
+});
+
+test('recomendações: o histórico do usuário (filme e série) é passado para esconder o que já foi aberto', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
+  await app.call('POST', '/api/play', { token, body: { type: 'movie', id: '10', title: 'Filme' } });
+  await app.call('POST', '/api/play', { token, body: { type: 'tv', id: '20', title: 'Série' } });
+  await app.call('GET', '/api/me/recommendations', { token });
+  assert.deepEqual(app.catalog.calls.at(-1), ['recommend', [28, 18], ['movie:10', 'tv:20']]);
+});
+
+test('recomendações: cada usuário vê só o que o próprio histórico exclui', async () => {
+  const app = makeApp();
+  const a = await app.registerAndApprove('a@exemplo.com');
+  const b = await app.registerAndApprove('b@exemplo.com', 'senha-bem-longa-1', 'Bia');
+  for (const user of [a, b]) await app.call('POST', '/api/me/preferences', { token: user.token, body: { genres: [28, 18] } });
+  await app.call('POST', '/api/play', { token: a.token, body: { type: 'movie', id: '10', title: 'Só da Ana' } });
+  await app.call('GET', '/api/me/recommendations', { token: b.token });
+  assert.deepEqual(app.catalog.calls.at(-1), ['recommend', [28, 18], []], 'o histórico da Ana não vaza para a Bia');
 });

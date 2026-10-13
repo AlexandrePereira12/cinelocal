@@ -16,6 +16,12 @@ const json = (body, status = 200, headers = {}) => ({
   json: async () => body,
 });
 
+// 12 gêneros de filme; cada filme falso devolve metade deles (ímpar: 1ª metade, par: 2ª), então 2 filmes já cobrem os 12.
+const GENRES = Array.from({ length: 12 }, (_, i) => ({ id: 100 + i, name: `Gênero ${i + 1}` }));
+
+// Gêneros de série usam ids próprios no TMDB (10759 = Ação e Aventura).
+const TV_GENRES = [{ id: 10759, name: 'Ação e Aventura' }, { id: 18, name: 'Drama' }];
+
 function fakeWorld({ movies = [101, 102], series = [201], tmdb = {}, declared } = {}) {
   const calls = [];
   const fetchImpl = async (url) => {
@@ -30,8 +36,8 @@ function fakeWorld({ movies = [101, 102], series = [201], tmdb = {}, declared } 
     const handler = tmdb[`${kind}:${id}`] ?? tmdb.default;
     if (handler) return handler(calls);
     return kind === 'movie'
-      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse' })
-      : json({ id: Number(id), name: `Série ${id}`, first_air_date: '2019-03-04', vote_count: 5, vote_average: 8, popularity: 3, seasons: [{ season_number: 1, episode_count: 4, air_date: '2019-03-04' }], last_episode_to_air: { season_number: 1, episode_number: 4 } });
+      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse', genres: Number(id) % 2 ? GENRES.slice(0, 6) : GENRES.slice(6) })
+      : json({ id: Number(id), name: `Série ${id}`, first_air_date: '2019-03-04', vote_count: 5, vote_average: 8, popularity: 3, genres: TV_GENRES, seasons: [{ season_number: 1, episode_count: 4, air_date: '2019-03-04' }], last_episode_to_air: { season_number: 1, episode_number: 4 } });
   };
   return { fetchImpl, calls };
 }
@@ -40,8 +46,9 @@ test('compactMovie mapeia os campos do TMDB, omite o que falta e descarta adulto
   const entry = compactMovie({
     id: 11, title: 'Título', original_title: 'Original', release_date: '2020-05-06', runtime: 95,
     poster_path: '/p.jpg', backdrop_path: '/b.jpg', vote_average: 7.26, vote_count: 321, popularity: 55.55, overview: '  Texto   com   espaços  ',
+    genres: [{ id: 28, name: 'Ação' }, { id: 18, name: 'Drama' }, { id: 'x', name: 'inválido' }, null],
   });
-  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95 });
+  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95, g: [28, 18] });
 
   const sparse = compactMovie({ id: 12, title: 'X', original_title: 'X', release_date: '', poster_path: '../x.jpg', vote_count: 0, vote_average: 0, runtime: 0, overview: '' });
   assert.deepEqual(JSON.parse(JSON.stringify(sparse)), { i: 12, t: 'X' }, 'sem título original igual, data, pôster inválido, nota sem votos, duração 0 ou sinopse vazia');
@@ -54,7 +61,7 @@ test('compactMovie mapeia os campos do TMDB, omite o que falta e descarta adulto
 test('compactSeries filtra temporadas: especiais, vazias, futuras e episódios ainda não exibidos', () => {
   const withLast = compactSeries(
     {
-      id: 1, name: 'S', first_air_date: '2020-01-01',
+      id: 1, name: 'S', first_air_date: '2020-01-01', genres: [{ id: 10759, name: 'Ação e Aventura' }, { id: 'x' }],
       seasons: [
         { season_number: 0, episode_count: 5, air_date: '2019-01-01' },
         { season_number: 1, episode_count: 10, air_date: '2020-01-01' },
@@ -67,6 +74,7 @@ test('compactSeries filtra temporadas: especiais, vazias, futuras e episódios a
     TODAY,
   );
   assert.deepEqual(withLast.s, [[1, 10], [3, 7]]);
+  assert.deepEqual(withLast.g, [10759], 'gêneros de série, descartando id inválido');
 
   const noLast = compactSeries(
     { id: 2, name: 'T', seasons: [{ season_number: 1, episode_count: 3, air_date: '2024-01-01' }, { season_number: 2, episode_count: 3, air_date: '2027-01-01' }, { season_number: 3, episode_count: 3, air_date: null }] },
@@ -123,6 +131,9 @@ test('coleta: 404 do TMDB é contado à parte, 429 respeita Retry-After e adulto
   assert.deepEqual(result.movies.map((m) => m.i), [1, 3]);
   assert.deepEqual(result.series.map((s) => s.i), [9]);
   assert.ok(sleeps.includes(3000), 'esperou o Retry-After de 3 s');
+  assert.equal(Object.keys(result.genres).length, 6, 'nomes de gênero vêm só dos filmes que trouxeram gêneros');
+  assert.equal(result.genres[100], 'Gênero 1');
+  assert.deepEqual(result.tvGenres, { 10759: 'Ação e Aventura', 18: 'Drama' }, 'gêneros de série ficam num mapa próprio');
 });
 
 test('coleta: usa Bearer, língua pt-BR e aborta com mensagem clara se o token for recusado', async () => {
@@ -143,6 +154,8 @@ test('gates rejeitam snapshot ruim', () => {
   assert.match(checkGates({ stats: { ...ok, notFound: 150 }, kept: 850, previousTotal: 0 })[0], /inexistentes no TMDB/);
   assert.match(checkGates({ stats: ok, kept: 800, previousTotal: 1000 })[0], /o total caiu de 1000 para 800/);
   assert.match(checkGates({ stats: { total: 0, ok: 0, notFound: 0, failed: 0, discarded: 0 }, kept: 0, previousTotal: 0 })[0], /nenhum título/);
+  assert.match(checkGates({ stats: ok, kept: 990, previousTotal: 0, genreCount: 3 })[0], /só 3 gêneros/);
+  assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, genreCount: 19 }), []);
 });
 
 test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com um ruim', async () => {
@@ -160,6 +173,10 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   const mod = await import(`${pathToFileURL(file).href}?v=1`);
   assert.equal(mod.default.movies.length, 10);
   assert.deepEqual(mod.default.series[0].s, [[1, 4]]);
+  assert.deepEqual(mod.default.series[0].g, [10759, 18]);
+  assert.deepEqual(mod.default.tvGenres, { 10759: 'Ação e Aventura', 18: 'Drama' });
+  assert.equal(Object.keys(mod.default.genres).length, 12);
+  assert.deepEqual(mod.default.movies[0].g, GENRES.slice(0, 6).map((g) => g.id), 'filme 1 (ímpar) traz os ids do 1º grupo');
   assert.ok(written.split('\n').filter((line) => line.startsWith('    {')).length === 12, 'um item por linha');
   assert.ok(!written.includes('TMDB_TOKEN') && !written.includes('Bearer'), 'nenhum segredo no arquivo');
 
@@ -167,6 +184,17 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   const broken = fakeWorld({ movies: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], series: [20, 21], tmdb: { default: () => json({}, 400) } });
   await assert.rejects(refreshCatalog({ ...common, fetchImpl: broken.fetchImpl }), /snapshot rejeitado.*falhas de rede/s);
   assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto');
+
+  // TMDB sem gêneros (mudança de formato, por exemplo): gate barra, senão a seleção de gêneros quebraria em produção
+  const noGenres = async (url, init) => {
+    const res = await good.fetchImpl(url, init);
+    if (!/\/3\/movie\//.test(url)) return res;
+    const body = await res.json();
+    delete body.genres;
+    return json(body);
+  };
+  await assert.rejects(refreshCatalog({ ...common, fetchImpl: noGenres }), /só 0 gêneros/);
+  assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto também sem gêneros');
 
   // all-ids encolheu muito frente ao anterior: gate de queda barra
   const shrunk = fakeWorld({ movies: [1, 2], series: [20] });
@@ -183,7 +211,9 @@ test('serialize gera JS válido mesmo com aspas e caracteres especiais no títul
   const dir = mkdtempSync(join(tmpdir(), 'catalogo-'));
   const file = join(dir, 'c.mjs');
   const tricky = { i: 1, t: 'Título "com aspas" e \\ barra   separador', y: '2020' };
-  writeFileSync(file, serialize({ generatedAt: '2026-01-01T00:00:00Z', movies: [tricky], series: [] }));
+  writeFileSync(file, serialize({ generatedAt: '2026-01-01T00:00:00Z', genres: { 28: 'Ação', 18: 'Drama' }, tvGenres: { 10759: 'Ação e Aventura' }, movies: [tricky], series: [] }));
   const mod = await import(pathToFileURL(file).href);
   assert.equal(mod.default.movies[0].t, tricky.t);
+  assert.deepEqual(mod.default.genres, { 18: 'Drama', 28: 'Ação' });
+  assert.deepEqual(mod.default.tvGenres, { 10759: 'Ação e Aventura' });
 });

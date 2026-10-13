@@ -11,6 +11,12 @@
  * - A busca é local, sem acento e sem diferenciar maiúsculas; cada palavra digitada precisa ser o começo de uma
  *   palavra do título (ou do título original). Começo do título vem primeiro, depois a popularidade.
  * - Séries: temporadas e episódios vêm da contagem do TMDB (sem sondar o provedor).
+ * - Gêneros: o usuário escolhe 2 gêneros de FILME (`genres()`); catálogo sem gêneros devolve `genres()` vazio e o
+ *   recurso fica desligado (ninguém é obrigado a escolher).
+ * - Recomendação (`recommend`) mistura filme e série: série tem ids de gênero próprios no TMDB, então cada gênero de
+ *   filme é ligado aos equivalentes de série por uma tabela fixa (TV_EQUIVALENTS). Gênero sem equivalente (Terror,
+ *   Romance, Thriller...) recomenda só filme. Três listas sem repetição entre si: só do gênero 1, só do gênero 2 e
+ *   os que têm os dois; o que o usuário já abriu (histórico) nunca é recomendado.
  */
 
 import { HttpError } from './errors.mjs';
@@ -21,6 +27,40 @@ const PAGE_SIZE = 30;
 const TRENDING_CAP = 60;
 const TOP_MIN_VOTES = 500;
 const SEARCH_LIMIT = 40;
+const RECOMMEND_LIMIT = 30;
+const MIX_MIN = 10; // com menos que isso de títulos nos dois gêneros, a lista "mistura" é completada com os próximos de cada gênero
+
+// Gênero de filme -> gêneros de série equivalentes (ids do TMDB TV). Os que não aparecem aqui não têm equivalente em série.
+const TV_EQUIVALENTS = {
+  28: [10759], // Ação -> Action & Adventure
+  12: [10759], // Aventura -> Action & Adventure
+  14: [10765], // Fantasia -> Sci-Fi & Fantasy
+  878: [10765], // Ficção científica -> Sci-Fi & Fantasy
+  10752: [10768], // Guerra -> War & Politics
+  16: [16], // Animação
+  35: [35], // Comédia
+  80: [80], // Crime
+  99: [99], // Documentário
+  18: [18], // Drama
+  10751: [10751], // Família
+  9648: [9648], // Mistério
+  37: [37], // Faroeste
+};
+
+// Alterna os itens de duas listas (a0, b0, a1, b1...); quando uma acaba, segue com o resto da outra.
+function zip(a, b) {
+  const out = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (i < a.length) out.push(a[i]);
+    if (i < b.length) out.push(b[i]);
+  }
+  return out;
+}
+
+// Filmes e séries (cada lista já por popularidade) em alternância, começando por quem tem o item mais popular: sempre mistura os dois tipos.
+function interleave(movies, shows) {
+  return (movies[0]?.entry.v ?? -1) >= (shows[0]?.entry.v ?? -1) ? zip(movies, shows) : zip(shows, movies);
+}
 
 const normalize = (text) =>
   String(text ?? '')
@@ -54,6 +94,15 @@ export function createCatalog({ data, now = Date.now }) {
 
   const byPopularity = (list) => [...list].sort(byDesc('v'));
   const byVotes = (list) => [...list].sort(byDesc('n'));
+  const moviesByPopularity = byPopularity(movies);
+  const seriesByPopularity = byPopularity(series);
+
+  // Gêneros de filme que de fato têm título no catálogo (ids e nomes em pt-BR vêm do TMDB, via snapshot).
+  const usedGenreIds = new Set(movies.flatMap((entry) => entry.g ?? []));
+  const genreOptions = Object.entries(data?.genres ?? {})
+    .map(([id, name]) => ({ id: Number(id), name: String(name) }))
+    .filter((genre) => Number.isInteger(genre.id) && usedGenreIds.has(genre.id))
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 
   const lists = {
     'trending-movies': { type: 'movie', cap: TRENDING_CAP, items: () => byPopularity(movies) },
@@ -91,6 +140,41 @@ export function createCatalog({ data, now = Date.now }) {
   }
 
   return {
+    // Opções para a escolha de gêneros favoritos (vazio = catálogo sem gêneros: o recurso fica desligado).
+    genres() {
+      return genreOptions.map((genre) => ({ ...genre }));
+    },
+
+    // Recomendações pelos 2 gêneros favoritos, misturando filme e série. `exclude` = chaves "tipo:id" que o usuário já abriu.
+    // Devolve { first, second, both }: só do 1º gênero, só do 2º e os que têm os dois. Sem repetição entre as três.
+    recommend([a, b], exclude = new Set(), limit = RECOMMEND_LIMIT) {
+      const fits = (type, entry, genreId) => {
+        if (type === 'movie') return Boolean(entry.g?.includes(genreId));
+        const equivalents = TV_EQUIVALENTS[genreId];
+        return Boolean(equivalents && entry.g?.some((id) => equivalents.includes(id)));
+      };
+      const pool = (type, list) =>
+        list
+          .filter((entry) => !exclude.has(`${type}:${entry.i}`))
+          .map((entry) => ({ type, entry, a: fits(type, entry, a), b: fits(type, entry, b) }))
+          .filter((row) => row.a || row.b);
+      const movieRows = pool('movie', moviesByPopularity);
+      const showRows = pool('tv', seriesByPopularity);
+      const pick = (test) => interleave(movieRows.filter(test), showRows.filter(test));
+
+      const firstAll = pick((row) => row.a && !row.b);
+      const secondAll = pick((row) => row.b && !row.a);
+      let both = pick((row) => row.a && row.b).slice(0, limit);
+      if (both.length < MIX_MIN) {
+        // Poucos títulos com os dois gêneros: completa com os que vêm depois dos já mostrados nas outras duas listas.
+        const seen = new Set(both.map((row) => `${row.type}:${row.entry.i}`));
+        const extra = zip(firstAll.slice(limit), secondAll.slice(limit)).filter((row) => !seen.has(`${row.type}:${row.entry.i}`));
+        both = [...both, ...extra].slice(0, limit);
+      }
+      const items = (rows) => rows.slice(0, limit).map((row) => toItem(row.type, row.entry));
+      return { first: items(firstAll), second: items(secondAll), both: items(both) };
+    },
+
     async list(name, page) {
       const list = lists[name];
       if (!list) throw new HttpError(404, 'Lista desconhecida', 'not_found');

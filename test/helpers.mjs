@@ -31,7 +31,7 @@ export function memoryStore() {
   };
 }
 
-export function fakeCatalog() {
+export function fakeCatalog({ withGenres = true } = {}) {
   const calls = [];
   return {
     calls,
@@ -51,15 +51,26 @@ export function fakeCatalog() {
       calls.push(['episodes', id, season]);
       return { season, episodes: [1, 2, 3] };
     },
+    genres() {
+      return withGenres ? [{ id: 28, name: 'Ação' }, { id: 35, name: 'Comédia' }, { id: 18, name: 'Drama' }] : [];
+    },
+    recommend(ids, exclude) {
+      calls.push(['recommend', ids, [...exclude].sort()]);
+      return {
+        first: [{ id: '1', type: 'movie', title: 'Só do 1º' }],
+        second: [{ id: '2', type: 'tv', title: 'Só do 2º' }],
+        both: [],
+      };
+    },
     lookup(type, id) {
       return type === 'movie' && id === '777' ? { title: 'Do Catálogo', year: '2024', poster: '/catalogo.jpg' } : null;
     },
   };
 }
 
-export function makeApp({ env: envOverrides = {}, mailFails = false } = {}) {
+export function makeApp({ env: envOverrides = {}, mailFails = false, genres = true } = {}) {
   const stores = { users: memoryStore(), library: memoryStore(), limits: memoryStore() };
-  const catalog = fakeCatalog();
+  const catalog = fakeCatalog({ withGenres: genres });
   const mails = [];
   const mailer = {
     async sendApprovalRequest(mail) {
