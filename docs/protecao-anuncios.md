@@ -25,7 +25,7 @@ página inteira para outro site. Não depende de o provedor aceitar `sandbox`.
 
 ### 2. Sandbox do iframe, escolhido por aparelho (padrão: desligado)
 
-Na tela do filme, em "Proteção contra anúncios (experimental)", a pessoa escolhe o modo; a escolha fica em
+Na tela do filme, numa barra "Proteção contra anúncios" logo abaixo do player (sempre visível, com o escudo verde quando o sandbox está ligado), a pessoa escolhe o modo; a escolha fica em
 `localStorage` (`cine.sandbox`) e o player recarrega.
 
 | Modo | `sandbox` | Efeito |
@@ -47,7 +47,7 @@ mesmo assim valer impedir o redirecionamento.
 ## Como validar quando o player estiver no ar
 
 1. Abra um filme no site publicado (o provedor só toca em domínio real, não em `localhost`).
-2. Em "Proteção contra anúncios", teste os modos na ordem `block`, `block-forms`, `redirect-only`.
+2. Na barra "Proteção contra anúncios", teste os modos na ordem `block`, `block-forms`, `redirect-only`.
 3. Para cada um, anote: o vídeo toca? aparece "remova o Sandbox"? abre aba ao clicar? tela cheia funciona?
 4. Se um modo passar nos quatro, troque `DEFAULT_SANDBOX` em `public/app.js` por ele (e ajuste o teste "vem desligado por
    padrão"). Se nenhum passar, o sandbox não é viável com este provedor; ficam a guarda (item 1) e, se quiser,

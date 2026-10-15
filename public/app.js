@@ -339,6 +339,7 @@ const ICONS = {
   bookmark: ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'],
   tv: ['M4 7h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z', 'M17 2l-5 5-5-5'],
   x: ['M18 6L6 18', 'M6 6l12 12'],
+  shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
 };
 
 // SVG inline montado por DOM (a CSP do site não aceita atributo style nem imagem de outra origem).
@@ -1843,7 +1844,7 @@ const SANDBOX_MODES = {
   block: {
     label: 'Bloquear abas e redirecionamentos',
     flags: 'allow-scripts allow-same-origin allow-presentation',
-    hint: 'Impede o player de abrir abas e de mandar a página para outro site. Se o player não tocar ou pedir para remover o sandbox, volte para “Desligada”.',
+    hint: 'Impede o player de abrir abas e de mandar a página para outro site.',
   },
   'block-forms': {
     label: 'Bloquear (com formulários)',
@@ -1976,7 +1977,10 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       ),
     );
   }
-  const sandboxHint = el('p', { class: 'note' }, SANDBOX_MODES[sandboxMode].hint);
+  // Barra logo abaixo do player: o modo escolhido fica sempre à vista, sem abrir nada.
+  const sandboxHint = el('p', { class: 'ad-bar-hint' });
+  const sandboxHelp = el('p', { class: 'ad-bar-hint' }, 'O player parou de tocar? Volte para “Desligada” ou use “Assistir em nova aba”.');
+  const adBar = el('div', { class: 'ad-bar' });
   const sandboxSelect = el(
     'select',
     {
@@ -1984,27 +1988,33 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       onchange: () => {
         sandboxMode = sandboxSelect.value;
         writeStore('cine.sandbox', { mode: sandboxMode });
-        sandboxHint.textContent = SANDBOX_MODES[sandboxMode].hint;
+        showSandboxMode();
         loadFrame();
       },
     },
     ...Object.entries(SANDBOX_MODES).map(([value, mode]) => el('option', { value, selected: value === sandboxMode }, mode.label)),
   );
+  function showSandboxMode() {
+    const mode = SANDBOX_MODES[sandboxMode];
+    adBar.classList.toggle('on', mode.flags !== null);
+    sandboxHint.textContent = mode.hint;
+    sandboxHelp.hidden = mode.flags === null; // o aviso de "volte para Desligada" só faz sentido com o sandbox ligado
+  }
+  adBar.append(
+    el('label', { class: 'ad-bar-title', for: 'sandbox-mode' }, icon('shield'), 'Proteção contra anúncios', el('span', { class: 'ad-bar-tag' }, 'experimental')),
+    sandboxSelect,
+    sandboxHint,
+    sandboxHelp,
+  );
+  showSandboxMode();
   page.append(
+    adBar,
     info,
     message,
     el(
       'p',
       { class: 'note' },
       'Se um anúncio abrir em outra aba, feche e volte. Bloqueadores de anúncio impedem o player de tocar.',
-    ),
-    el(
-      'details',
-      { class: 'ad-protect' },
-      el('summary', {}, 'Proteção contra anúncios (experimental)'),
-      el('div', { class: 'controls' }, el('label', { for: 'sandbox-mode' }, 'Modo'), sandboxSelect),
-      sandboxHint,
-      el('p', { class: 'note' }, 'Se o player parar de tocar depois de mudar o modo, volte para “Desligada” ou use “Assistir em nova aba”.'),
     ),
   );
   app.replaceChildren(page);
