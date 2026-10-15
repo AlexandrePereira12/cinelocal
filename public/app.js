@@ -339,6 +339,7 @@ const ICONS = {
   bookmark: ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'],
   tv: ['M4 7h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z', 'M17 2l-5 5-5-5'],
   x: ['M18 6L6 18', 'M6 6l12 12'],
+  shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
 };
 
 // SVG inline montado por DOM (a CSP do site não aceita atributo style nem imagem de outra origem).
@@ -1825,6 +1826,46 @@ function openCastDialog(cast) {
   });
 }
 
+// --- proteção contra anúncios: `sandbox` do iframe do player ---
+// O player é de outro domínio: o site não vê nem intercepta o clique que abre o anúncio. O único freio do navegador é o
+// `sandbox`, que tira do iframe a permissão de abrir abas e de navegar a página principal. Mas o provedor já se
+// recusou a tocar sob sandbox (commit c928eb5, "remova o Sandbox"), então o padrão é DESLIGADO e cada aparelho liga
+// a variação que o provedor aceitar, na própria tela do filme (fica em localStorage). Ninguém lê de dentro do iframe se
+// ele foi aceito: quem decide é a pessoa, vendo o vídeo tocar. Para virar padrão, troque `DEFAULT_SANDBOX` quando uma
+// variação for validada com o player no ar.
+// Nenhuma variação pode ter allow-top-navigation* nem allow-popups-to-escape-sandbox: seriam o oposto da proteção
+// (test/ad-protection.test.mjs trava isso).
+const SANDBOX_MODES = {
+  off: {
+    label: 'Desligada (como o player vem)',
+    flags: null,
+    hint: 'O player roda sem restrição: anúncios podem abrir abas e redirecionar a página.',
+  },
+  block: {
+    label: 'Bloquear abas e redirecionamentos',
+    flags: 'allow-scripts allow-same-origin allow-presentation',
+    hint: 'Impede o player de abrir abas e de mandar a página para outro site.',
+  },
+  'block-forms': {
+    label: 'Bloquear (com formulários)',
+    flags: 'allow-scripts allow-same-origin allow-presentation allow-forms',
+    hint: 'Igual a “Bloquear”, mas deixa o player enviar formulários. Foi a variação testada em 12/10.',
+  },
+  'redirect-only': {
+    label: 'Só impedir redirecionamento',
+    flags: 'allow-scripts allow-same-origin allow-presentation allow-popups',
+    hint: 'NÃO impede abas: elas abrem, só que isoladas (sem acesso ao site). Bloqueia apenas o redirecionamento da página.',
+  },
+};
+const DEFAULT_SANDBOX = 'off';
+
+function loadSandboxMode() {
+  const mode = readStore('cine.sandbox').mode;
+  return typeof mode === 'string' && Object.hasOwn(SANDBOX_MODES, mode) ? mode : DEFAULT_SANDBOX;
+}
+
+let sandboxMode = loadSandboxMode();
+
 // --- trava do "voltar" na tela do filme ---
 // No celular o gesto de voltar (borda da tela) é fácil de acionar sem querer e tira a pessoa do filme; ao reabrir, o
 // player recomeça e os anúncios vêm de novo. Ao abrir a tela empilha-se uma entrada igual à atual (a "guarda"): o
@@ -1858,6 +1899,7 @@ function onWatchGuardPop(event) {
   confirmDialog('Sair do player?', 'Se sair, o player recarrega e os anúncios podem aparecer de novo.', 'Sair', 'Continuar assistindo').then((leave) => {
     leavePrompt = false;
     if (!leave || !watchGuard) return;
+    watchGuard.leaving = true; // a pessoa já confirmou: o beforeunload não pergunta de novo
     // Pilha: [..., anterior, tela, guarda]. Sem entrada anterior (link aberto direto) não há para onde voltar: vai ao início.
     if (history.length > 2) history.go(-2);
     else location.replace('#/');
@@ -1865,6 +1907,20 @@ function onWatchGuardPop(event) {
 }
 
 window.addEventListener('popstate', onWatchGuardPop);
+
+// Guarda contra sequestro da página: se o player (ou um anúncio dentro dele) mandar a página inteira para outro site,
+// o navegador pergunta antes de sair. Vale só na tela do filme (`watchGuard`). É a defesa que funciona mesmo sem sandbox.
+// Limites: o navegador só pergunta se a pessoa já interagiu com a página (um clique no player conta); a pergunta também
+// aparece ao fechar a aba ou recarregar (não dá para distinguir de um redirecionamento); o Safari do iOS ignora.
+// A saída que a própria pessoa confirmou em "Sair do player?" marca `leaving` para não perguntar uma segunda vez
+// quando o voltar cai em outro documento.
+function onWatchBeforeUnload(event) {
+  if (!watchGuard || watchGuard.leaving) return;
+  event.preventDefault();
+  event.returnValue = ''; // exigido por navegadores mais antigos; o texto da pergunta é sempre o do navegador
+}
+
+window.addEventListener('beforeunload', onWatchBeforeUnload);
 
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const isTv = type === 'tv';
@@ -1921,7 +1977,38 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       ),
     );
   }
+  // Barra logo abaixo do player: o modo escolhido fica sempre à vista, sem abrir nada.
+  const sandboxHint = el('p', { class: 'ad-bar-hint' });
+  const sandboxHelp = el('p', { class: 'ad-bar-hint' }, 'O player parou de tocar? Volte para “Desligada” ou use “Assistir em nova aba”.');
+  const adBar = el('div', { class: 'ad-bar' });
+  const sandboxSelect = el(
+    'select',
+    {
+      id: 'sandbox-mode',
+      onchange: () => {
+        sandboxMode = sandboxSelect.value;
+        writeStore('cine.sandbox', { mode: sandboxMode });
+        showSandboxMode();
+        loadFrame();
+      },
+    },
+    ...Object.entries(SANDBOX_MODES).map(([value, mode]) => el('option', { value, selected: value === sandboxMode }, mode.label)),
+  );
+  function showSandboxMode() {
+    const mode = SANDBOX_MODES[sandboxMode];
+    adBar.classList.toggle('on', mode.flags !== null);
+    sandboxHint.textContent = mode.hint;
+    sandboxHelp.hidden = mode.flags === null; // o aviso de "volte para Desligada" só faz sentido com o sandbox ligado
+  }
+  adBar.append(
+    el('label', { class: 'ad-bar-title', for: 'sandbox-mode' }, icon('shield'), 'Proteção contra anúncios', el('span', { class: 'ad-bar-tag' }, 'experimental')),
+    sandboxSelect,
+    sandboxHint,
+    sandboxHelp,
+  );
+  showSandboxMode();
   page.append(
+    adBar,
     info,
     message,
     el(
@@ -2006,7 +2093,8 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     player.replaceChildren(
       el('iframe', {
         src: data.url,
-        // Sem `sandbox` de propósito: o player do provedor detecta e se recusa a tocar ("remova o Sandbox").
+        // `sandbox` só se a pessoa ligou (padrão desligado): o player do provedor já se recusou a tocar sob sandbox.
+        sandbox: SANDBOX_MODES[sandboxMode].flags,
         allowfullscreen: true,
         allow: 'autoplay; fullscreen; encrypted-media; picture-in-picture',
         title: data.title,
