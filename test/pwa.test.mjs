@@ -241,3 +241,15 @@ test('app.js registra o service worker e instala direto pelo prompt nativo ou ab
   assert.match(app, /function openInstallDialog\(\)/);
   assert.ok(!app.includes("'#/app'"), 'a página #/app foi substituída pelo painel');
 });
+
+// O comportamento (voltar → pergunta → player intacto) só se prova num navegador; aqui ficam as três peças que, se
+// alguém mexer, quebram a trava sem barulho: a guarda precisa sobreviver à troca de endereço do episódio, o hashchange
+// de desempilhar a guarda não pode remontar a tela (recarregaria o player) e sair da tela precisa soltar a guarda.
+test('trava do voltar na tela do filme: peças que não podem se soltar', async () => {
+  const app = await text('public/app.js');
+  assert.match(app, /history\.replaceState\(history\.state, '', hash\)/, 'o endereço do episódio não pode apagar o state da guarda');
+  assert.match(app, /if \(watchGuard && location\.hash === watchGuard\.hash\) return;[\s\S]{0,100}route\(\);/, 'hashchange da guarda não remonta a tela');
+  assert.match(app, /const token = \+\+navToken;\s+watchGuard = null;/, 'trocar de tela solta a guarda');
+  assert.match(app, /app\.replaceChildren\(page\);\s+armWatchGuard\(\);/, 'a guarda é armada ao montar a tela do filme');
+  assert.match(app, /window\.addEventListener\('popstate', onWatchGuardPop\)/);
+});

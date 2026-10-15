@@ -1380,7 +1380,7 @@ async function renderLibrary(token) {
 // --- perfil: nome, gêneros, senha e sessões ---
 
 // Pergunta de confirmação numa janela (em vez do confirm() do navegador, que não combina com o resto). Resolve true/false.
-function confirmDialog(title, text, actionLabel) {
+function confirmDialog(title, text, actionLabel, cancelLabel = 'Cancelar') {
   return new Promise((resolve) => {
     let answer = false;
     const dialog = showDialog(
@@ -1390,7 +1390,7 @@ function confirmDialog(title, text, actionLabel) {
         'div',
         { class: 'cast-row' },
         el('button', { class: 'btn danger', type: 'button', onclick: () => ((answer = true), dialog.close()) }, actionLabel),
-        el('button', { class: 'btn', type: 'button', onclick: () => dialog.close() }, 'Cancelar'),
+        el('button', { class: 'btn', type: 'button', onclick: () => dialog.close() }, cancelLabel),
       ),
     );
     dialog.addEventListener('close', () => resolve(answer));
@@ -1825,6 +1825,47 @@ function openCastDialog(cast) {
   });
 }
 
+// --- trava do "voltar" na tela do filme ---
+// No celular o gesto de voltar (borda da tela) é fácil de acionar sem querer e tira a pessoa do filme; ao reabrir, o
+// player recomeça e os anúncios vêm de novo. Ao abrir a tela empilha-se uma entrada igual à atual (a "guarda"): o
+// primeiro voltar só a desempilha e o site pergunta se a pessoa quer sair. Com a pergunta aberta a guarda é recolocada
+// a cada voltar, então um segundo voltar sem querer também não sai. As duas entradas levam o mesmo id no history.state
+// (`cineWatch` na tela, `cineGuard` na guarda) para reconhecer só o voltar que desempilhou a guarda desta tela.
+// O Chrome pula entradas criadas sem interação prévia com a página: nesse caso o voltar sai como sempre saiu.
+
+let watchGuard = null; // { id, hash } enquanto a tela do filme está aberta
+let leavePrompt = false;
+
+function armWatchGuard() {
+  const state = history.state;
+  if (state?.cineGuard) {
+    watchGuard = { id: state.cineGuard, hash: location.hash }; // recarregou ou voltou até a guarda: já está armada
+    return;
+  }
+  const id = state?.cineWatch ?? Math.random().toString(36).slice(2);
+  history.replaceState({ ...state, cineWatch: id }, '');
+  history.pushState({ cineGuard: id }, '');
+  watchGuard = { id, hash: location.hash };
+}
+
+function onWatchGuardPop(event) {
+  if (!watchGuard || event.state?.cineWatch !== watchGuard.id) return;
+  // A entrada de baixo pode guardar o endereço de um episódio anterior; as duas passam a ter o endereço atual da tela.
+  history.replaceState({ cineWatch: watchGuard.id }, '', watchGuard.hash);
+  history.pushState({ cineGuard: watchGuard.id }, '', watchGuard.hash);
+  if (leavePrompt) return;
+  leavePrompt = true;
+  confirmDialog('Sair do player?', 'Se sair, o player recarrega e os anúncios podem aparecer de novo.', 'Sair', 'Continuar assistindo').then((leave) => {
+    leavePrompt = false;
+    if (!leave || !watchGuard) return;
+    // Pilha: [..., anterior, tela, guarda]. Sem entrada anterior (link aberto direto) não há para onde voltar: vai ao início.
+    if (history.length > 2) history.go(-2);
+    else location.replace('#/');
+  });
+}
+
+window.addEventListener('popstate', onWatchGuardPop);
+
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const isTv = type === 'tv';
   const known = meta[`${type}:${id}`];
@@ -1890,6 +1931,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     ),
   );
   app.replaceChildren(page);
+  armWatchGuard();
 
   // Nota, duração, gêneros e sinopse do catálogo, abaixo do player (vêm na resposta do /play).
   function renderInfo(extra) {
@@ -1970,7 +2012,11 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
         title: data.title,
       }),
     );
-    if (isTv) history.replaceState(null, '', `#/assistir/tv/${id}/${data.season}/${data.episode}`);
+    if (isTv) {
+      const hash = `#/assistir/tv/${id}/${data.season}/${data.episode}`;
+      history.replaceState(history.state, '', hash); // mantém a guarda do voltar
+      if (watchGuard) watchGuard.hash = hash;
+    }
     refreshControls();
     followCast(cast);
   }
@@ -2071,6 +2117,7 @@ function setActiveNav(key) {
 
 function route() {
   const token = ++navToken;
+  watchGuard = null;
   clearInterval(heroTimer);
   document.title = 'Cine Local';
   window.scrollTo(0, 0);
@@ -2178,7 +2225,10 @@ document.getElementById('logout').addEventListener('click', () => {
   location.hash = '#/login';
 });
 
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => {
+  if (watchGuard && location.hash === watchGuard.hash) return; // desempilhar/recolocar a guarda não troca de tela
+  route();
+});
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
