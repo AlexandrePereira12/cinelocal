@@ -40,8 +40,10 @@ export function fakeCatalog({ withGenres = true } = {}) {
       calls.push(['list', name, page]);
       return { page, totalPages: 1, items: [{ id: '1', type: 'movie', title: 'Filme', year: '2020', poster: '/a.jpg', quality: 'HD', rating: null, runtime: 90 }] };
     },
-    async search(term) {
-      calls.push(['search', term]);
+    async search(term, options) {
+      // Sem filtro, a chamada é registrada como antes; com filtro, as opções vão junto.
+      const filtered = options && (options.type || options.from !== null || options.to !== null);
+      calls.push(filtered ? ['search', term, options] : ['search', term]);
       return { items: [] };
     },
     async seasons(id) {
@@ -63,20 +65,59 @@ export function fakeCatalog({ withGenres = true } = {}) {
         both: [],
       };
     },
+    // Títulos "do catálogo": o filme 777 e a série 300 (S1 com 2 episódios, S2 com 1).
     lookup(type, id) {
-      return type === 'movie' && id === '777' ? { title: 'Do Catálogo', year: '2024', poster: '/catalogo.jpg' } : null;
+      if (type === 'movie' && id === '777') return { title: 'Do Catálogo', year: '2024', poster: '/catalogo.jpg' };
+      if (type === 'tv' && id === '300') return { title: 'Série do Catálogo', year: '2022', poster: '/serie.jpg' };
+      return null;
+    },
+    info(type, id) {
+      if (type === 'movie' && id === '777') return { overview: 'Sinopse do catálogo', rating: 7.5, votes: 100, runtime: 100, originalTitle: null, genres: ['Ação'], seasons: null, episodes: null };
+      return null;
+    },
+    detail(type, id) {
+      const known = this.lookup(type, id);
+      return known ? { id, type, ...known, overview: 'Sinopse', genres: ['Ação'], similar: [{ id: '5', type, title: 'Parecido' }] } : null;
+    },
+    similar(type, id, options = {}) {
+      calls.push(['similar', type, id, [...(options.exclude ?? [])].sort()]);
+      return id === '10' ? [{ id: '5', type, title: 'Parecido com o 10' }] : [];
+    },
+    async browse(options) {
+      calls.push(['browse', options]);
+      return { page: options.page, totalPages: 1, total: 0, items: [] };
+    },
+    browseGenres() {
+      const list = [{ id: 28, name: 'Ação' }];
+      return { all: list, movie: list, tv: [{ id: 10759, name: 'Action & Adventure' }] };
+    },
+    nextEpisode(id, season, episode) {
+      if (id !== '300') return null;
+      if (season === 1 && episode === 1) return { season: 1, episode: 2 };
+      if (season === 1 && episode === 2) return { season: 2, episode: 1 };
+      return null;
     },
   };
 }
 
-export function makeApp({ env: envOverrides = {}, mailFails = false, genres = true } = {}) {
+export function makeApp({ env: envOverrides = {}, mailFails = false, userMailFails = false, genres = true } = {}) {
   const stores = { users: memoryStore(), library: memoryStore(), limits: memoryStore(), tv: memoryStore() };
   const catalog = fakeCatalog({ withGenres: genres });
   const mails = [];
+  const notices = [];
+  const resets = [];
   const mailer = {
     async sendApprovalRequest(mail) {
       if (mailFails) throw new Error('mail_failed:500');
       mails.push(mail);
+    },
+    async sendDecisionNotice(mail) {
+      if (userMailFails) throw new Error('mail_failed:500');
+      notices.push(mail);
+    },
+    async sendPasswordReset(mail) {
+      if (userMailFails) throw new Error('mail_failed:500');
+      resets.push(mail);
     },
   };
   const clock = { ms: Date.parse('2026-10-11T12:00:00Z') };
@@ -119,5 +160,5 @@ export function makeApp({ env: envOverrides = {}, mailFails = false, genres = tr
     return { token: login.body.token, email, password };
   }
 
-  return { call, stores, catalog, mails, domainChecks, clock, env, registerAndApprove };
+  return { call, stores, catalog, mails, notices, resets, domainChecks, clock, env, registerAndApprove };
 }

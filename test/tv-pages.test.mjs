@@ -88,14 +88,15 @@ test('as páginas da TV não têm script nem estilo inline (a CSP bloquearia) e 
   assert.match(await text('public/receiver.html'), /src="https:\/\/www\.gstatic\.com\/cast\/sdk\/libs\/caf_receiver\/v3\/cast_receiver_framework\.js"/);
 });
 
-test('a CSP libera só o que o Cast pediu (gstatic, Shaka e o canal local do Chromecast), sem extensões', async () => {
+test('a CSP libera só o que o Cast e o cache de pôsteres pediram (gstatic, Shaka, canal local do Chromecast e image.tmdb.org), sem extensões', async () => {
   const policy = await csp();
   const script = directive(policy, 'script-src');
   assert.match(script, /https:\/\/www\.gstatic\.com/);
   assert.match(script, /https:\/\/ajax\.googleapis\.com/);
   assert.ok(!script.includes('chrome-extension'), 'o SDK real não pediu extensão do Chrome');
   assert.ok(!script.includes("'unsafe-inline'") && !script.includes("'unsafe-eval'"));
-  assert.equal(directive(policy, 'connect-src'), "connect-src 'self' ws://localhost:8008");
+  // image.tmdb.org: o service worker (sw.js) busca os pôsteres e o fetch() dele obedece ao connect-src; sem a origem, todo pôster quebra.
+  assert.equal(directive(policy, 'connect-src'), "connect-src 'self' https://image.tmdb.org ws://localhost:8008");
   assert.ok(!script.includes('*') && !directive(policy, 'connect-src').includes('*'), 'sem curinga');
 });
 

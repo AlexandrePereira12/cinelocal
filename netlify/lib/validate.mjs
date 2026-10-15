@@ -64,6 +64,18 @@ export function intInRange(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
+// Parâmetros de query chegam como texto: só aceita inteiro decimal puro (nada de "1e3", "0x10" ou " 7").
+export function intParam(value, min, max) {
+  return typeof value === 'string' && /^\d{1,6}$/.test(value) ? intInRange(Number(value), min, max) : null;
+}
+
+// Nota mínima do explorar: de 1 a 10, com no máximo uma casa decimal.
+export function ratingParam(value) {
+  if (typeof value !== 'string' || !/^\d{1,2}(\.\d)?$/.test(value)) return null;
+  const rating = Number(value);
+  return rating >= 1 && rating <= 10 ? rating : null;
+}
+
 export function badRequest(message = 'Requisição inválida') {
   return new HttpError(400, message, 'bad_request');
 }

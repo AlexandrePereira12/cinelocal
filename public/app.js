@@ -3,16 +3,46 @@
 const HERO_ROTATE_MS = 8000;
 const HERO_SIZE = 5;
 const META_LIMIT = 400;
+const SEARCH_CAP = 40; // igual a SEARCH_LIMIT do servidor (catalog.mjs): a busca para aqui, então avisamos
 const TOKEN_KEY = 'cine.token';
 
 const LIST_TITLES = {
+  'new-this-week': 'Novidades da semana',
   'trending-movies': 'Filmes em alta',
   'trending-shows': 'Séries em alta',
   'top-movies': 'Mais avaliados',
   'recent-movies': 'Lançamentos',
+  classics: 'Clássicos',
+  'short-movies': 'Filmes até 90 min',
+  'short-shows': 'Séries curtas',
   'library-movies': 'Filmes',
   'library-shows': 'Séries',
 };
+
+// Fileiras "de sempre" da home, na ordem em que aparecem. Fileira vazia (ex.: sem novidades) simplesmente não aparece.
+const HOME_LISTS = ['new-this-week', 'trending-movies', 'trending-shows', 'top-movies', 'recent-movies', 'classics', 'short-movies', 'short-shows'];
+
+// Faixas de ano dos filtros (busca e explorar): valor "de-até" e texto do seletor.
+const YEAR_RANGES = [
+  ['', 'Qualquer ano'],
+  ['2020-2100', '2020 em diante'],
+  ['2010-2019', '2010 a 2019'],
+  ['2000-2009', '2000 a 2009'],
+  ['1990-1999', '1990 a 1999'],
+  ['1980-1989', '1980 a 1989'],
+  ['1900-1979', 'Antes de 1980'],
+];
+const TYPE_OPTIONS = [
+  ['all', 'Filmes e séries'],
+  ['movie', 'Só filmes'],
+  ['tv', 'Só séries'],
+];
+const RATING_OPTIONS = [
+  ['', 'Qualquer nota'],
+  ['6', 'Nota 6 ou mais'],
+  ['7', 'Nota 7 ou mais'],
+  ['8', 'Nota 8 ou mais'],
+];
 
 const app = document.getElementById('app');
 const searchInput = document.getElementById('search');
@@ -134,10 +164,34 @@ function watchHref(item) {
   return `#/assistir/${item.type}/${item.id}`;
 }
 
+function detailHref(item) {
+  return `#/titulo/${item.type}/${item.id}`;
+}
+
 // --- componentes ---
 
 function spinner(text = 'Carregando…') {
   return el('div', { class: 'state' }, el('div', { class: 'spinner' }), text);
+}
+
+// Esqueletos: o formato da tela aparece na hora e o conteúdo entra no lugar (em vez de um círculo girando numa tela vazia).
+const skeletonCard = () => el('div', { class: 'skeleton sk-card' });
+
+function skeletonRow() {
+  return el('div', { class: 'row' }, el('div', { class: 'skeleton sk-title' }), el('div', { class: 'row-scroll' }, Array.from({ length: 10 }, skeletonCard)));
+}
+
+function skeletonHome() {
+  return el('div', { class: 'sk-page', 'aria-busy': 'true' }, el('span', { class: 'sr-only' }, 'Carregando…'), el('div', { class: 'skeleton sk-hero' }), skeletonRow(), skeletonRow());
+}
+
+function skeletonDetail() {
+  return el(
+    'div',
+    { class: 'page sk-page', 'aria-busy': 'true' },
+    el('span', { class: 'sr-only' }, 'Carregando…'),
+    el('div', { class: 'detail-body' }, el('div', { class: 'skeleton sk-poster' }), el('div', { class: 'sk-text' }, el('div', { class: 'skeleton sk-title' }), el('div', { class: 'skeleton sk-line' }), el('div', { class: 'skeleton sk-line' }), el('div', { class: 'skeleton sk-line short' }))),
+  );
 }
 
 function errorState(message, retry) {
@@ -149,6 +203,7 @@ function errorState(message, retry) {
   );
 }
 
+// Quem já tem histórico (item da biblioteca) abre direto no player, para retomar; o resto abre a tela de detalhe.
 function card(item) {
   const src = posterUrl(item.poster, 'w342');
   const progressLabel = item.type === 'tv' && item.season != null ? `T${item.season} · E${item.episode}` : null;
@@ -159,12 +214,11 @@ function card(item) {
       ? el('img', { src, alt: '', loading: 'lazy', decoding: 'async' })
       : el('div', { class: 'card-fallback' }, item.title),
     item.type === 'tv' && el('span', { class: 'badge left type' }, progressLabel ?? 'Série'),
-    item.quality && item.type !== 'tv' && el('span', { class: 'badge left' }, item.quality),
     item.rating != null && el('span', { class: 'badge right' }, `★ ${item.rating.toFixed(1)}`),
   );
   return el(
     'a',
-    { class: 'card', href: watchHref(item), title: item.title },
+    { class: 'card', href: item.lastViewedAt ? watchHref(item) : detailHref(item), title: item.title },
     poster,
     el('div', { class: 'card-title' }, item.title),
     item.year && el('div', { class: 'card-year' }, item.year),
@@ -187,6 +241,7 @@ function hero(items) {
   const info = el('p', { class: 'hero-meta' });
   const overview = el('p', { class: 'hero-overview' });
   const play = el('a', { class: 'btn primary' }, '▶ Assistir');
+  const details = el('a', { class: 'btn' }, 'Detalhes');
   const poster = el('img', { class: 'hero-poster', alt: '' });
   const dots = el('div', { class: 'hero-dots' });
   const root = el(
@@ -194,11 +249,12 @@ function hero(items) {
     { class: 'hero' },
     bg,
     el('div', { class: 'hero-shade' }),
-    el('div', { class: 'hero-body' }, el('div', { class: 'hero-text' }, tag, title, info, overview, play), poster),
+    el('div', { class: 'hero-body' }, el('div', { class: 'hero-text' }, tag, title, info, overview, el('div', { class: 'hero-actions' }, play, details)), poster),
     dots,
   );
 
   let current = 0;
+  let paused = false; // mouse em cima ou foco dentro: o destaque não troca debaixo de quem está lendo ou prestes a clicar
   const buttons = items.map((_, i) =>
     el('button', { type: 'button', 'aria-label': `Destaque ${i + 1}`, onclick: () => show(i, true) }),
   );
@@ -212,17 +268,38 @@ function hero(items) {
     bg.style.backgroundImage = `url("${item.backdrop ? posterUrl(item.backdrop, 'w1280') : posterUrl(item.poster, 'w780')}")`;
     poster.src = posterUrl(item.poster, 'w500');
     title.textContent = item.title;
-    info.textContent = [item.year, item.quality, item.rating != null && `★ ${item.rating.toFixed(1)}`, item.runtime && `${item.runtime} min`].filter(Boolean).join(' · ');
+    info.textContent = [item.year, item.rating != null && `★ ${item.rating.toFixed(1)}`, item.runtime && `${item.runtime} min`].filter(Boolean).join(' · ');
     overview.textContent = item.overview ?? '';
     play.href = watchHref(item);
+    details.href = detailHref(item);
     buttons.forEach((b, i) => b.classList.toggle('on', i === index));
     if (manual) startRotation();
   }
 
+  // Quem pede menos movimento no sistema (prefers-reduced-motion) não recebe troca automática: só pelos botões.
   function startRotation() {
     clearInterval(heroTimer);
-    if (items.length > 1) heroTimer = setInterval(() => show((current + 1) % items.length), HERO_ROTATE_MS);
+    if (items.length > 1 && !paused && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      heroTimer = setInterval(() => show((current + 1) % items.length), HERO_ROTATE_MS);
+    }
   }
+
+  function pause() {
+    paused = true;
+    clearInterval(heroTimer);
+  }
+
+  function resume() {
+    paused = false;
+    startRotation();
+  }
+
+  root.addEventListener('mouseenter', pause);
+  root.addEventListener('mouseleave', resume);
+  root.addEventListener('focusin', pause);
+  root.addEventListener('focusout', (event) => {
+    if (!root.contains(event.relatedTarget)) resume();
+  });
 
   show(0);
   startRotation();
@@ -334,8 +411,9 @@ function bindEmailValidation(root, { okText = '' } = {}) {
 }
 
 // Campo de senha com botão para mostrar/ocultar o que está sendo digitado e aviso de Caps Lock.
-function passwordField(label, id, attrs) {
-  const toggle = el('button', { class: 'toggle-pass', type: 'button', 'aria-label': 'Mostrar senha', title: 'Mostrar senha' }, icon('eye'));
+// `reveal: false` tira o botão de mostrar: a "senha atual" da troca de senha nunca deve aparecer na tela (ombro de quem passa, captura de tela).
+function passwordField(label, id, attrs, { reveal = true } = {}) {
+  const toggle = reveal ? el('button', { class: 'toggle-pass', type: 'button', 'aria-label': 'Mostrar senha', title: 'Mostrar senha' }, icon('eye')) : null;
   const root = field(
     label,
     id,
@@ -346,7 +424,7 @@ function passwordField(label, id, attrs) {
   const caps = el('p', { class: 'field-hint', hidden: true }, 'Caps Lock ligado');
   root.append(caps);
 
-  toggle.addEventListener('click', () => {
+  toggle?.addEventListener('click', () => {
     const show = input.type === 'password';
     const text = show ? 'Ocultar senha' : 'Mostrar senha';
     input.type = show ? 'text' : 'password';
@@ -383,6 +461,63 @@ function passwordChecklist(id) {
       });
       meter.dataset.score = String(score);
       return score === PASSWORD_RULES.length;
+    },
+  };
+}
+
+// Senha nova + repetição, com a lista de requisitos e a barra de força: cadastro, redefinição e troca de senha usam o mesmo bloco.
+function newPasswordGroup({ label = 'Senha', passId = 'password', repeatId = 'password2', rulesId = 'password-rules' } = {}) {
+  const passRoot = passwordField(label, passId, { autocomplete: 'new-password', 'aria-describedby': `${passId}-msg ${rulesId}` });
+  const checklist = passwordChecklist(rulesId);
+  const repeatRoot = passwordField('Repita a senha', repeatId, { autocomplete: 'new-password' });
+  const passInput = passRoot.querySelector('input');
+  const repeatInput = repeatRoot.querySelector('input');
+  let repeatTouched = false;
+
+  function checkPassword(strict = false) {
+    const valid = checklist.update(passInput.value);
+    if (strict && !valid) setFieldState(passRoot, 'invalid', 'A senha ainda não atende a todos os requisitos.');
+    else setFieldState(passRoot, valid ? 'valid' : null);
+    return valid;
+  }
+
+  function checkRepeat(strict = false) {
+    const same = repeatInput.value === passInput.value;
+    const valid = same && repeatInput.value !== '';
+    if (valid) setFieldState(repeatRoot, 'valid', 'As senhas conferem.');
+    else if (!repeatInput.value) setFieldState(repeatRoot, strict ? 'invalid' : null, strict ? 'Repita a senha.' : '');
+    else if (strict || repeatTouched || repeatInput.value.length >= passInput.value.length) setFieldState(repeatRoot, 'invalid', 'As senhas não conferem.');
+    else setFieldState(repeatRoot, null);
+    return valid;
+  }
+
+  passInput.addEventListener('input', () => {
+    checkPassword();
+    if (repeatInput.value) checkRepeat();
+  });
+  repeatInput.addEventListener('input', () => checkRepeat());
+  repeatInput.addEventListener('blur', () => {
+    repeatTouched = true;
+    if (repeatInput.value) checkRepeat();
+  });
+
+  return {
+    nodes: [passRoot, checklist.root, repeatRoot],
+    input: passInput,
+    value: () => passInput.value,
+    // Marca o que estiver errado e devolve o primeiro campo inválido (ou null se está tudo certo).
+    firstInvalid() {
+      const passOk = checkPassword(true);
+      const repeatOk = checkRepeat(true);
+      if (!passOk) return passInput;
+      return repeatOk ? null : repeatInput;
+    },
+    reset() {
+      passInput.value = '';
+      repeatInput.value = '';
+      repeatTouched = false;
+      checkPassword();
+      checkRepeat();
     },
   };
 }
@@ -469,6 +604,7 @@ function renderLogin() {
     message,
     emailRoot,
     passRoot,
+    el('a', { class: 'forgot-link', href: '#/esqueci' }, 'Esqueci minha senha'),
     error,
     submit,
     el('p', { class: 'auth-alt' }, 'Ainda não tem conta? ', el('a', { href: '#/cadastro' }, 'Solicitar cadastro')),
@@ -488,14 +624,9 @@ function renderRegister() {
   const nameRoot = field('Nome', 'name', { type: 'text', autocomplete: 'name', maxlength: '60', placeholder: 'Como devemos te chamar?' }, { iconName: 'user' });
   const emailRoot = emailField();
   const checkEmail = bindEmailValidation(emailRoot, { okText: 'Formato válido' });
-  const passRoot = passwordField('Senha', 'password', { autocomplete: 'new-password', 'aria-describedby': 'password-msg password-rules' });
-  const checklist = passwordChecklist('password-rules');
-  const repeatRoot = passwordField('Repita a senha', 'password2', { autocomplete: 'new-password' });
+  const passwords = newPasswordGroup();
 
   const nameInput = nameRoot.querySelector('input');
-  const passInput = passRoot.querySelector('input');
-  const repeatInput = repeatRoot.querySelector('input');
-  let repeatTouched = false;
 
   function checkName(strict = false) {
     const valid = nameInput.value.replace(/\s+/g, ' ').trim().length >= 2;
@@ -503,33 +634,7 @@ function renderRegister() {
     return valid;
   }
 
-  function checkPassword(strict = false) {
-    const valid = checklist.update(passInput.value);
-    if (strict && !valid) setFieldState(passRoot, 'invalid', 'A senha ainda não atende a todos os requisitos.');
-    else setFieldState(passRoot, valid ? 'valid' : null);
-    return valid;
-  }
-
-  function checkRepeat(strict = false) {
-    const same = repeatInput.value === passInput.value;
-    const valid = same && repeatInput.value !== '';
-    if (valid) setFieldState(repeatRoot, 'valid', 'As senhas conferem.');
-    else if (!repeatInput.value) setFieldState(repeatRoot, strict ? 'invalid' : null, strict ? 'Repita a senha.' : '');
-    else if (strict || repeatTouched || repeatInput.value.length >= passInput.value.length) setFieldState(repeatRoot, 'invalid', 'As senhas não conferem.');
-    else setFieldState(repeatRoot, null);
-    return valid;
-  }
-
   nameInput.addEventListener('input', () => checkName());
-  passInput.addEventListener('input', () => {
-    checkPassword();
-    if (repeatInput.value) checkRepeat();
-  });
-  repeatInput.addEventListener('input', () => checkRepeat());
-  repeatInput.addEventListener('blur', () => {
-    repeatTouched = true;
-    if (repeatInput.value) checkRepeat();
-  });
 
   const form = el(
     'form',
@@ -542,20 +647,19 @@ function renderRegister() {
         const checks = [
           [nameInput, checkName(true)],
           [form.elements.email, checkEmail(true)],
-          [passInput, checkPassword(true)],
-          [repeatInput, checkRepeat(true)],
         ];
-        const firstInvalid = checks.find(([, valid]) => !valid);
+        const passwordProblem = passwords.firstInvalid();
+        const firstInvalid = checks.find(([, valid]) => !valid)?.[0] ?? passwordProblem;
         if (firstInvalid) {
           error.textContent = 'Corrija os campos destacados.';
-          firstInvalid[0].focus();
+          firstInvalid.focus();
           return;
         }
         setBusy(submit, true, 'Enviando…');
         try {
           const data = await api('auth/register', {
             method: 'POST',
-            body: { name: nameInput.value, email: form.elements.email.value.trim(), password: passInput.value },
+            body: { name: nameInput.value, email: form.elements.email.value.trim(), password: passwords.value() },
           });
           slot.replaceChildren(
             el(
@@ -581,9 +685,7 @@ function renderRegister() {
     ...cardHead('Solicitar cadastro', 'O acesso é liberado depois que o administrador aprovar o seu cadastro.'),
     nameRoot,
     emailRoot,
-    passRoot,
-    checklist.root,
-    repeatRoot,
+    ...passwords.nodes,
     error,
     submit,
     el('p', { class: 'auth-alt' }, 'Já tem conta? ', el('a', { href: '#/login' }, 'Entrar')),
@@ -593,6 +695,106 @@ function renderRegister() {
     authStage({ title: ['Peça o seu ', el('em', {}, 'acesso'), '.'], lede: 'Crie a sua conta em poucos passos. Assim que for aprovada, o catálogo completo é seu.' }, slot),
   );
   nameInput.focus();
+}
+
+// Pede o link de redefinição. A resposta é sempre a mesma, exista a conta ou não (o servidor não revela quem tem conta).
+function renderForgot() {
+  const error = el('p', { class: 'form-error', role: 'alert' });
+  const submit = el('button', { class: 'btn primary block', type: 'submit' }, 'Enviar o link');
+  const slot = el('div', { class: 'auth-slot' });
+  const emailRoot = emailField();
+  const checkEmail = bindEmailValidation(emailRoot);
+
+  const form = el(
+    'form',
+    {
+      class: 'auth-card',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        if (!checkEmail(true)) {
+          form.elements.email.focus();
+          return;
+        }
+        setBusy(submit, true, 'Enviando…');
+        try {
+          const data = await api('auth/forgot', { method: 'POST', body: { email: form.elements.email.value.trim() } });
+          slot.replaceChildren(
+            el(
+              'div',
+              { class: 'auth-card' },
+              el('span', { class: 'success-mark' }, icon('check')),
+              el('h1', {}, 'Confira o seu e-mail'),
+              el('p', { class: 'form-info', role: 'status' }, data.message),
+              el('p', { class: 'auth-hint' }, 'Não chegou? Veja a caixa de spam. Dá para pedir de novo, com um intervalo.'),
+              el('a', { class: 'btn primary block', href: '#/login' }, 'Voltar ao login'),
+            ),
+          );
+        } catch (err) {
+          error.textContent = err.message;
+          setBusy(submit, false, 'Enviar o link');
+        }
+      },
+    },
+    ...cardHead('Esqueci minha senha', 'Informe o e-mail do cadastro. Se existir uma conta aprovada, enviamos um link para escolher uma nova senha.'),
+    emailRoot,
+    error,
+    submit,
+    el('p', { class: 'auth-alt' }, 'Lembrou? ', el('a', { href: '#/login' }, 'Entrar')),
+  );
+  slot.append(form);
+  app.replaceChildren(authStage({ title: ['Vamos recuperar o seu ', el('em', {}, 'acesso'), '.'], lede: 'O link chega por e-mail, vale por 1 hora e só pode ser usado uma vez.' }, slot));
+  form.elements.email.focus();
+}
+
+// Página aberta pelo link do e-mail (#/redefinir/<token>). O token sai da barra de endereço assim que é lido, como na decisão do admin.
+function renderReset(token) {
+  if (token) history.replaceState(null, '', '#/redefinir');
+  if (!token) {
+    app.replaceChildren(
+      el('div', { class: 'auth-wrap' }, el('div', { class: 'auth-card' }, el('h1', {}, 'Link inválido'), el('p', { class: 'form-error' }, 'Abra o link de redefinição direto do e-mail. Se ele já foi usado ou venceu, peça outro.'), el('a', { class: 'btn primary', href: '#/esqueci' }, 'Pedir novo link'))),
+    );
+    return;
+  }
+
+  const error = el('p', { class: 'form-error', role: 'alert' });
+  const submit = el('button', { class: 'btn primary block', type: 'submit' }, 'Salvar a nova senha');
+  const passwords = newPasswordGroup({ label: 'Nova senha' });
+
+  const form = el(
+    'form',
+    {
+      class: 'auth-card',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        const problem = passwords.firstInvalid();
+        if (problem) {
+          error.textContent = 'Corrija os campos destacados.';
+          problem.focus();
+          return;
+        }
+        setBusy(submit, true, 'Salvando…');
+        try {
+          const data = await api('auth/reset', { method: 'POST', body: { token, password: passwords.value() } });
+          clearSession(data.message); // se havia uma sessão neste navegador, ela já caiu no servidor
+          location.hash = '#/login';
+        } catch (err) {
+          error.textContent = err.code === 'invalid_token' ? 'Este link já foi usado ou venceu. Peça um novo.' : err.message;
+          setBusy(submit, false, 'Salvar a nova senha');
+          if (err.code === 'invalid_token') error.append(' ', el('a', { href: '#/esqueci' }, 'Pedir novo link'));
+        }
+      },
+    },
+    ...cardHead('Nova senha', 'Escolha uma senha que você ainda não usa em outro lugar.'),
+    ...passwords.nodes,
+    error,
+    submit,
+  );
+  app.replaceChildren(authStage({ title: ['Escolha uma ', el('em', {}, 'nova senha'), '.'], lede: 'Depois de salvar, as sessões abertas nos outros aparelhos são encerradas.' }, el('div', { class: 'auth-slot' }, form)));
+  passwords.input.focus();
 }
 
 // Atribuição exigida pelos termos de uso do TMDB: fica numa página de créditos, fora das telas principais.
@@ -856,46 +1058,45 @@ async function renderDecision(token, navId) {
 // --- páginas autenticadas ---
 
 async function renderHome(token) {
-  app.replaceChildren(spinner());
-  const names = ['trending-movies', 'trending-shows', 'top-movies', 'recent-movies'];
+  app.replaceChildren(skeletonHome());
   const favorites = session.genres ?? [];
-  const settled = await Promise.allSettled([
-    api('me/library'),
-    favorites.length ? api('me/recommendations') : Promise.resolve({ rows: [] }),
-    ...names.map((name) => api(`list/${name}`)),
-  ]);
+  const settled = await Promise.allSettled([api('me/library'), api('me/recommendations'), ...HOME_LISTS.map((name) => api(`list/${name}`))]);
   if (token !== navToken) return;
   const [libraryResult, recommendationsResult, ...results] = settled;
+  const listResult = (name) => results[HOME_LISTS.indexOf(name)];
 
   const page = el('div');
-  const featured = results[0].status === 'fulfilled' ? results[0].value.items.filter((i) => i.poster && i.backdrop).slice(0, HERO_SIZE) : [];
+  const trending = listResult('trending-movies');
+  const featured = trending.status === 'fulfilled' ? trending.value.items.filter((i) => i.poster && i.backdrop).slice(0, HERO_SIZE) : [];
   if (featured.length) page.append(hero(featured));
 
-  const library = libraryResult.status === 'fulfilled' ? libraryResult.value : { continue: [], watched: [] };
-  remember([...library.continue, ...library.watched]);
+  const library = libraryResult.status === 'fulfilled' ? libraryResult.value : { continue: [], watched: [], watchlist: [] };
+  remember([...library.continue, ...library.watched, ...(library.watchlist ?? [])]);
 
-  // 1. continuar assistindo
+  // 1. continuar assistindo e o que a pessoa guardou para ver
   if (library.continue.length) page.append(row('Continuar assistindo', library.continue, '#/biblioteca'));
+  if (library.watchlist?.length) page.append(row('Quero ver', library.watchlist, '#/biblioteca'));
 
-  // 2. gosto 1, gosto 2 e a mistura dos dois (filmes e séries, sem "Ver tudo")
+  // 2. "Porque você assistiu X" e, com gêneros escolhidos, gosto 1, gosto 2 e a mistura dos dois (filmes e séries, sem "Ver tudo")
   if (favorites.length) {
     page.append(
       el('p', { class: 'genre-bar' }, 'Seus gêneros: ', el('strong', {}, favorites.map((genre) => genre.name).join(' · ')), ' — ', el('a', { href: '#/generos' }, 'alterar')),
     );
-    if (recommendationsResult.status === 'fulfilled') {
-      for (const { title, items } of recommendationsResult.value.rows) {
-        remember(items);
-        page.append(row(title, items));
-      }
+  }
+  if (recommendationsResult.status === 'fulfilled') {
+    for (const { title, items } of recommendationsResult.value.rows) {
+      remember(items);
+      page.append(row(title, items));
     }
   }
 
   // 3. as fileiras de sempre
   let loaded = 0;
-  results.forEach((result, i) => {
+  HOME_LISTS.forEach((name, i) => {
+    const result = results[i];
     if (result.status !== 'fulfilled' || !result.value.items.length) return;
     remember(result.value.items);
-    page.append(row(LIST_TITLES[names[i]], result.value.items, `#/lista/${names[i]}`));
+    page.append(row(LIST_TITLES[name], result.value.items, `#/lista/${name}`));
     loaded++;
   });
 
@@ -910,30 +1111,41 @@ async function renderHome(token) {
   app.replaceChildren(page);
 }
 
-function renderPagedGrid(title, loadPage, token) {
-  const grid = el('div', { class: 'grid' });
+// `header` entra entre o título e a grade (filtros); `onData` recebe cada resposta (ex.: total de resultados).
+function renderPagedGrid(title, loadPage, token, { header = null, onData = null } = {}) {
+  const grid = el('div', { class: 'grid', 'aria-busy': 'true' }, Array.from({ length: 18 }, skeletonCard));
   const more = el('div', { class: 'more' });
-  const page = el('div', { class: 'page' }, el('h1', {}, title), grid, more);
+  const page = el('div', { class: 'page' }, el('h1', {}, title), header, grid, more);
   app.replaceChildren(page);
 
   let next = 1;
   let loading = false;
 
+  function clearSkeleton() {
+    grid.replaceChildren();
+    grid.removeAttribute('aria-busy');
+  }
+
   async function loadMore() {
     if (loading) return;
     loading = true;
-    more.replaceChildren(spinner());
+    if (next > 1) more.replaceChildren(spinner());
     try {
       const data = await loadPage(next);
       if (token !== navToken) return;
+      if (next === 1) clearSkeleton(); // tira os esqueletos
       remember(data.items);
       grid.append(...data.items.map(card));
+      onData?.(data);
       next++;
       const hasMore = data.totalPages != null && next <= data.totalPages;
       if (!grid.children.length) more.replaceChildren(el('div', { class: 'state' }, 'Nada encontrado.'));
       else more.replaceChildren(hasMore ? el('button', { class: 'btn', type: 'button', onclick: loadMore }, 'Carregar mais') : '');
     } catch (err) {
-      if (token === navToken) more.replaceChildren(errorState(err.message, loadMore));
+      if (token === navToken) {
+        if (next === 1) clearSkeleton();
+        more.replaceChildren(errorState(err.message, loadMore));
+      }
     } finally {
       loading = false;
     }
@@ -951,16 +1163,201 @@ function renderList(name, token) {
   renderPagedGrid(title, (page) => api(`list/${name}?page=${page}`), token);
 }
 
-function renderSearch(term, token) {
-  renderPagedGrid(`Resultados para “${term}”`, async () => ({ ...(await api(`search?q=${encodeURIComponent(term)}`)), totalPages: 1 }), token);
+// --- filtros (busca e explorar): o estado mora na própria URL, então voltar, recarregar e compartilhar funcionam ---
+
+// Só aceita o que está na lista de opções (a URL é digitável: valor estranho vira o padrão em vez de virar pergunta ao servidor).
+function pickOption(value, options, fallback) {
+  return options.some(([optionValue]) => optionValue === value) ? value : fallback;
+}
+
+function hashWithQuery(base, params) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value));
+  const text = query.toString();
+  return text ? `${base}?${text}` : base;
+}
+
+function filterSelect(label, id, options, value, onChange) {
+  const select = el(
+    'select',
+    { id, onchange: () => onChange(select.value) },
+    options.map(([optionValue, text]) => el('option', { value: optionValue, selected: optionValue === value }, text)),
+  );
+  return el('div', { class: 'pick' }, el('label', { for: id }, label), select);
+}
+
+// "2010-2019" -> parâmetros de ano da API.
+function addYearRange(query, range) {
+  if (!range) return;
+  const [from, to] = range.split('-');
+  query.set('from', from);
+  query.set('to', to);
+}
+
+function renderSearch(term, params, token) {
+  const type = pickOption(params.get('tipo'), TYPE_OPTIONS, 'all');
+  const range = pickOption(params.get('ano'), YEAR_RANGES, '');
+  const go = (next) => {
+    location.hash = hashWithQuery(`#/busca/${encodeURIComponent(term)}`, { tipo: next.type === 'all' ? '' : next.type, ano: next.range });
+  };
+  const note = el('p', { class: 'filters-note', 'aria-live': 'polite' });
+  const header = el(
+    'div',
+    { class: 'filters' },
+    filterSelect('Tipo', 'filter-type', TYPE_OPTIONS, type, (value) => go({ type: value, range })),
+    filterSelect('Ano', 'filter-year', YEAR_RANGES, range, (value) => go({ type, range: value })),
+    note,
+  );
+  renderPagedGrid(
+    `Resultados para “${term}”`,
+    async () => {
+      const query = new URLSearchParams({ q: term });
+      if (type !== 'all') query.set('type', type);
+      addYearRange(query, range);
+      return { ...(await api(`search?${query}`)), totalPages: 1 };
+    },
+    token,
+    { header, onData: (data) => (note.textContent = data.items.length >= SEARCH_CAP ? `Mostrando os ${SEARCH_CAP} primeiros. Use os filtros para refinar.` : '') },
+  );
+}
+
+// Explorar: tipo, gênero, ano e nota. Os gêneros de "séries" são os próprios das séries; "filmes e séries" usa os de filme.
+let browseOptions = null;
+
+async function renderExplore(params, token) {
+  app.replaceChildren(el('div', { class: 'page' }, el('h1', {}, 'Explorar'), el('div', { class: 'grid', 'aria-busy': 'true' }, Array.from({ length: 18 }, skeletonCard))));
+  try {
+    browseOptions ??= await api('browse/options');
+  } catch (err) {
+    if (token === navToken) app.replaceChildren(errorState(err.message, () => route()));
+    return;
+  }
+  if (token !== navToken) return;
+
+  const type = pickOption(params.get('tipo'), TYPE_OPTIONS, 'all');
+  const genreOptions = [['', 'Todos os gêneros'], ...browseOptions[type].map((genre) => [String(genre.id), genre.name])];
+  const genre = pickOption(params.get('genero'), genreOptions, '');
+  const range = pickOption(params.get('ano'), YEAR_RANGES, '');
+  const rating = pickOption(params.get('nota'), RATING_OPTIONS, '');
+  const go = (next) => {
+    location.hash = hashWithQuery('#/explorar', { tipo: next.type === 'all' ? '' : next.type, genero: next.genre, ano: next.range, nota: next.rating });
+  };
+  const current = { type, genre, range, rating };
+
+  const total = el('p', { class: 'filters-note', 'aria-live': 'polite' });
+  const header = el(
+    'div',
+    { class: 'filters' },
+    filterSelect('Tipo', 'filter-type', TYPE_OPTIONS, type, (value) => go({ ...current, type: value, genre: value === 'tv' || type === 'tv' ? '' : genre })), // os ids de gênero de série são outros
+    filterSelect('Gênero', 'filter-genre', genreOptions, genre, (value) => go({ ...current, genre: value })),
+    filterSelect('Ano', 'filter-year', YEAR_RANGES, range, (value) => go({ ...current, range: value })),
+    filterSelect('Nota', 'filter-rating', RATING_OPTIONS, rating, (value) => go({ ...current, rating: value })),
+    total,
+  );
+  renderPagedGrid(
+    'Explorar',
+    (page) => {
+      const query = new URLSearchParams({ type, page: String(page) });
+      if (genre) query.set('genre', genre);
+      if (rating) query.set('rating', rating);
+      addYearRange(query, range);
+      return api(`browse?${query}`);
+    },
+    token,
+    { header, onData: (data) => (total.textContent = data.total === 1 ? '1 título' : `${data.total} títulos`) },
+  );
+}
+
+// --- detalhe do título: o que o card não cabe (sinopse, gêneros, parecidos) e "Quero ver" ---
+
+async function renderTitle(type, id, token) {
+  app.replaceChildren(skeletonDetail());
+  let data;
+  try {
+    data = await api(`title/${type}/${id}`);
+  } catch (err) {
+    if (token !== navToken) return;
+    if (err.status === 410) {
+      app.replaceChildren(el('div', { class: 'auth-wrap' }, el('div', { class: 'auth-card' }, el('h1', {}, 'Título indisponível'), el('p', { class: 'auth-hint' }, 'Este título não está mais no catálogo.'), el('a', { class: 'btn', href: '#/' }, 'Voltar ao início'))));
+    } else {
+      app.replaceChildren(errorState(err.message, () => route()));
+    }
+    return;
+  }
+  if (token !== navToken) return;
+  document.title = `${data.title} — Cine Local`;
+  remember([{ type: data.type, id: data.id, title: data.title, year: data.year, poster: data.poster }]); // só o básico: `data` carrega sinopse e parecidos
+
+  const bg = el('div', { class: 'detail-bg' });
+  const backdrop = posterUrl(data.backdrop ?? data.poster, data.backdrop ? 'w1280' : 'w780');
+  if (backdrop) bg.style.backgroundImage = `url("${backdrop}")`; // CSSOM, não atributo `style`: a CSP do site bloqueia o atributo
+  bg.classList.toggle('sharp', Boolean(data.backdrop));
+
+  const seasons = data.seasons ? `${data.seasons} ${data.seasons === 1 ? 'temporada' : 'temporadas'}` + (data.episodes ? ` · ${data.episodes} episódios` : '') : null;
+  const meta = [data.year, data.runtime && `${data.runtime} min`, seasons, data.rating != null && `★ ${data.rating.toFixed(1)}${data.votes ? ` (${data.votes} votos)` : ''}`].filter(Boolean).join(' · ');
+
+  const progress = data.progress;
+  const playLabel = !progress ? '▶ Assistir' : progress.done ? '▶ Assistir de novo' : type === 'tv' ? `▶ Continuar T${progress.season} · E${progress.episode}` : '▶ Continuar';
+  const message = el('p', { class: 'form-error', role: 'alert' });
+
+  let inList = data.inWatchlist;
+  const listButton = el('button', { class: 'btn', type: 'button', onclick: () => toggleList() });
+  function paintList() {
+    listButton.replaceChildren(icon('bookmark'), inList ? 'Na lista “Quero ver”' : 'Quero ver');
+    listButton.setAttribute('aria-pressed', String(inList));
+  }
+  async function toggleList() {
+    message.textContent = '';
+    listButton.disabled = true;
+    try {
+      inList = (await api('me/watchlist', { method: 'POST', body: { type, id, add: !inList } })).inWatchlist;
+      paintList();
+    } catch (err) {
+      message.textContent = err.message;
+    } finally {
+      listButton.disabled = false;
+    }
+  }
+  paintList();
+
+  const posterSrc = posterUrl(data.poster, 'w500');
+  app.replaceChildren(
+    el(
+      'div',
+      {},
+      el(
+        'section',
+        { class: 'detail' },
+        bg,
+        el('div', { class: 'detail-shade' }),
+        el(
+          'div',
+          { class: 'detail-body' },
+          posterSrc ? el('img', { class: 'detail-poster', src: posterSrc, alt: '' }) : el('div', { class: 'detail-poster card-fallback' }, data.title),
+          el(
+            'div',
+            { class: 'detail-text' },
+            el('h1', {}, data.title),
+            data.originalTitle && el('p', { class: 'sub' }, data.originalTitle),
+            meta && el('p', { class: 'detail-meta' }, meta),
+            data.genres.length > 0 && el('ul', { class: 'tags' }, data.genres.map((name) => el('li', {}, name))),
+            data.overview ? el('p', { class: 'detail-overview' }, data.overview) : el('p', { class: 'detail-overview empty' }, 'Sem sinopse no catálogo.'),
+            progress?.done && el('p', { class: 'detail-seen' }, '✓ Você já assistiu'),
+            el('div', { class: 'detail-actions' }, el('a', { class: 'btn primary', href: watchHref({ type, id }) }, playLabel), listButton),
+            message,
+          ),
+        ),
+      ),
+      data.similar.length > 0 && row('Títulos parecidos', data.similar),
+    ),
+  );
 }
 
 async function renderLibrary(token) {
   app.replaceChildren(spinner());
   try {
-    const { continue: resume, watched } = await api('me/library');
+    const { continue: resume, watched, watchlist } = await api('me/library');
     if (token !== navToken) return;
-    remember([...resume, ...watched]);
+    remember([...resume, ...watched, ...watchlist]);
 
     const section = (title, items, empty) =>
       el('section', {}, el('h2', { class: 'section-title' }, title), items.length ? el('div', { class: 'grid' }, items.map(card)) : el('p', { class: 'empty' }, empty));
@@ -971,12 +1368,190 @@ async function renderLibrary(token) {
         { class: 'page' },
         el('h1', {}, 'Minha lista'),
         section('Continuar assistindo', resume, 'Nada em andamento. Abra um filme ou série para ele aparecer aqui.'),
+        section('Quero ver', watchlist, 'Abra um filme ou série e toque em “Quero ver” para guardá-lo aqui.'),
         section('Assistir novamente', watched, 'Marque um título como assistido, no player, para guardá-lo aqui.'),
       ),
     );
   } catch (err) {
     if (token === navToken) app.replaceChildren(errorState(err.message, () => route()));
   }
+}
+
+// --- perfil: nome, gêneros, senha e sessões ---
+
+// Pergunta de confirmação numa janela (em vez do confirm() do navegador, que não combina com o resto). Resolve true/false.
+function confirmDialog(title, text, actionLabel) {
+  return new Promise((resolve) => {
+    let answer = false;
+    const dialog = showDialog(
+      title,
+      el('p', { class: 'modal-intro' }, text),
+      el(
+        'div',
+        { class: 'cast-row' },
+        el('button', { class: 'btn danger', type: 'button', onclick: () => ((answer = true), dialog.close()) }, actionLabel),
+        el('button', { class: 'btn', type: 'button', onclick: () => dialog.close() }, 'Cancelar'),
+      ),
+    );
+    dialog.addEventListener('close', () => resolve(answer));
+  });
+}
+
+async function renderAccount(token) {
+  app.replaceChildren(spinner());
+  let account;
+  try {
+    account = await api('me/account');
+  } catch (err) {
+    if (token === navToken) app.replaceChildren(errorState(err.message, () => route()));
+    return;
+  }
+  if (token !== navToken) return;
+
+  // 1. nome
+  const nameRoot = field('Nome', 'name', { type: 'text', autocomplete: 'name', maxlength: '60', value: account.name }, { iconName: 'user' });
+  const nameInput = nameRoot.querySelector('input');
+  const nameInfo = el('p', { class: 'form-info', role: 'status' });
+  const nameError = el('p', { class: 'form-error', role: 'alert' });
+  const nameSave = el('button', { class: 'btn primary', type: 'submit' }, 'Salvar nome');
+  const nameForm = el(
+    'form',
+    {
+      class: 'panel',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        nameInfo.textContent = '';
+        nameError.textContent = '';
+        if (nameInput.value.replace(/\s+/g, ' ').trim().length < 2) {
+          setFieldState(nameRoot, 'invalid', 'Informe o seu nome (2 a 60 caracteres).');
+          nameInput.focus();
+          return;
+        }
+        setFieldState(nameRoot, null);
+        setBusy(nameSave, true, 'Salvando…');
+        try {
+          const saved = await api('me/account', { method: 'POST', body: { name: nameInput.value } });
+          applyProfile({ name: saved.name, genres: saved.genres, needsGenres: saved.needsGenres });
+          updateChrome();
+          nameInput.value = saved.name;
+          nameInfo.textContent = 'Nome atualizado.';
+        } catch (err) {
+          nameError.textContent = err.message;
+        } finally {
+          setBusy(nameSave, false, 'Salvar nome');
+        }
+      },
+    },
+    el('h2', {}, 'Seus dados'),
+    el('p', { class: 'auth-hint' }, 'E-mail: ', el('strong', {}, account.email)),
+    nameRoot,
+    nameInfo,
+    nameError,
+    el('div', { class: 'genres-actions' }, nameSave),
+  );
+
+  // 2. gêneros favoritos
+  const favorites = session.genres ?? [];
+  const genresPanel = el(
+    'section',
+    { class: 'panel' },
+    el('h2', {}, 'Gêneros favoritos'),
+    el('p', { class: 'auth-hint' }, favorites.length ? favorites.map((genre) => genre.name).join(' · ') : 'Você ainda não escolheu.'),
+    el('div', { class: 'genres-actions' }, el('a', { class: 'btn', href: '#/generos' }, 'Alterar gêneros')),
+  );
+
+  // 3. senha
+  const currentRoot = passwordField('Senha atual', 'current-password', { autocomplete: 'current-password' }, { reveal: false });
+  const passwords = newPasswordGroup({ label: 'Nova senha', passId: 'new-password', repeatId: 'new-password2', rulesId: 'new-password-rules' });
+  const passInfo = el('p', { class: 'form-info', role: 'status' });
+  const passError = el('p', { class: 'form-error', role: 'alert' });
+  const passSave = el('button', { class: 'btn primary', type: 'submit' }, 'Trocar senha');
+  const passForm = el(
+    'form',
+    {
+      class: 'panel',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        passInfo.textContent = '';
+        passError.textContent = '';
+        const currentInput = currentRoot.querySelector('input');
+        const hasCurrent = Boolean(currentInput.value);
+        setFieldState(currentRoot, hasCurrent ? null : 'invalid', hasCurrent ? '' : 'Informe a sua senha atual.');
+        const problem = passwords.firstInvalid();
+        if (!hasCurrent || problem) {
+          passError.textContent = 'Corrija os campos destacados.';
+          (hasCurrent ? problem : currentInput).focus();
+          return;
+        }
+        setBusy(passSave, true, 'Trocando…');
+        try {
+          const data = await api('me/password', { method: 'POST', body: { current: currentInput.value, next: passwords.value() } });
+          session.token = data.token; // o servidor encerrou as outras sessões; esta continua com o token novo
+          try {
+            localStorage.setItem(TOKEN_KEY, data.token);
+          } catch {
+            /* sem storage: vale só nesta aba */
+          }
+          currentInput.value = '';
+          passwords.reset();
+          passInfo.textContent = 'Senha alterada. Os outros aparelhos foram desconectados.';
+        } catch (err) {
+          if (err.code === 'wrong_password') {
+            setFieldState(currentRoot, 'invalid', err.message);
+            currentInput.focus();
+          } else {
+            passError.textContent = err.message;
+          }
+        } finally {
+          setBusy(passSave, false, 'Trocar senha');
+        }
+      },
+    },
+    el('h2', {}, 'Trocar senha'),
+    currentRoot,
+    ...passwords.nodes,
+    passInfo,
+    passError,
+    el('div', { class: 'genres-actions' }, passSave),
+  );
+  currentRoot.querySelector('input').addEventListener('input', () => setFieldState(currentRoot, null));
+
+  // 4. sessões
+  const logoutError = el('p', { class: 'form-error', role: 'alert' });
+  const logoutAll = el(
+    'section',
+    { class: 'panel' },
+    el('h2', {}, 'Segurança'),
+    el('p', { class: 'auth-hint' }, 'Perdeu um aparelho ou esqueceu a sessão aberta em algum lugar? Encerre todas, inclusive esta.'),
+    logoutError,
+    el(
+      'div',
+      { class: 'genres-actions' },
+      el(
+        'button',
+        {
+          class: 'btn danger',
+          type: 'button',
+          onclick: async () => {
+            logoutError.textContent = '';
+            if (!(await confirmDialog('Sair de todos os dispositivos?', 'Todas as sessões abertas, neste e em outros aparelhos, serão encerradas e você precisará entrar de novo.', 'Sair de todos'))) return;
+            try {
+              await api('me/logout-all', { method: 'POST', body: {} });
+              clearSession('Você saiu de todos os dispositivos. Entre de novo.');
+              location.hash = '#/login';
+            } catch (err) {
+              logoutError.textContent = err.message;
+            }
+          },
+        },
+        'Sair de todos os dispositivos',
+      ),
+    ),
+  );
+
+  app.replaceChildren(el('div', { class: 'page account-page' }, el('h1', {}, 'Meu perfil'), nameForm, genresPanel, passForm, logoutAll));
 }
 
 // --- transmitir para a TV ---
@@ -1122,6 +1697,7 @@ let castSdkLoad = null;
 let castAppIdLoad = null;
 let castReady = false;
 let castNotify = null; // quem está ouvindo as respostas do receptor (o painel aberto)
+const listened = new WeakSet(); // sessões do Cast que já têm o ouvinte (um por sessão, não um por abertura do painel)
 
 function loadCastSdk() {
   castSdkLoad ??= new Promise((resolve) => {
@@ -1166,8 +1742,7 @@ function chromecastOption(cast) {
     if (!context) return;
     root.hidden = false;
 
-    const listened = new WeakSet();
-    const listen = (session) => session.addMessageListener(CAST_NAMESPACE, (_namespace, raw) => castNotify?.(typeof raw === 'string' ? JSON.parse(raw) : raw));
+    const listen =(session) => session.addMessageListener(CAST_NAMESPACE, (_namespace, raw) => castNotify?.(typeof raw === 'string' ? JSON.parse(raw) : raw));
     const paint = () => {
       const session = context.getCurrentSession();
       if (!session) {
@@ -1270,6 +1845,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const subtitle = el('p', { class: 'sub' });
   const player = el('div', { class: 'player' });
   const message = el('p', { class: 'form-error', role: 'alert' });
+  const info = el('div', { class: 'watch-info' });
 
   const openLink = el('a', { class: 'btn primary', target: '_blank', rel: 'noopener noreferrer' }, '▶ Assistir em nova aba');
   const castBtn = el('button', { class: 'btn', type: 'button', onclick: () => openCastDialog(cast) }, icon('tv'), 'Transmitir para a TV');
@@ -1305,6 +1881,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     );
   }
   page.append(
+    info,
     message,
     el(
       'p',
@@ -1313,6 +1890,25 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     ),
   );
   app.replaceChildren(page);
+
+  // Nota, duração, gêneros e sinopse do catálogo, abaixo do player (vêm na resposta do /play).
+  function renderInfo(extra) {
+    if (!extra) {
+      info.replaceChildren();
+      return;
+    }
+    const facts = [
+      extra.rating != null && `★ ${extra.rating.toFixed(1)}`,
+      extra.runtime && `${extra.runtime} min`,
+      extra.seasons && `${extra.seasons} ${extra.seasons === 1 ? 'temporada' : 'temporadas'}`,
+      ...(extra.genres ?? []),
+    ].filter(Boolean);
+    info.replaceChildren(
+      facts.length > 0 && el('p', { class: 'watch-meta' }, facts.join(' · ')),
+      extra.overview && el('p', { class: 'watch-overview' }, extra.overview),
+      el('a', { class: 'watch-detail-link', href: detailHref({ type, id }) }, 'Ver detalhes e títulos parecidos'),
+    );
+  }
 
   // Garante que o item atual (ex.: vindo de link direto) apareça na lista mesmo se a sondagem não o achou.
   function withCurrent(list, current) {
@@ -1324,7 +1920,9 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   }
 
   function refreshControls() {
-    doneBtn.textContent = state.done ? '✓ Assistido (desmarcar)' : 'Marcar como assistido';
+    // Em série, "assistido" vale para o episódio (e já abre o próximo); só o último episódio conclui a série toda.
+    if (isTv) doneBtn.textContent = state.done ? '✓ Série concluída (desmarcar)' : 'Marcar episódio como assistido';
+    else doneBtn.textContent = state.done ? '✓ Assistido (desmarcar)' : 'Marcar como assistido';
     if (!isTv) return;
     const seasons = withCurrent(state.seasons, state.season);
     const episodes = withCurrent(state.episodes, state.episode);
@@ -1360,6 +1958,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     heading.textContent = data.title;
     subtitle.textContent = [data.year, isTv && `Temporada ${data.season} · Episódio ${data.episode}`].filter(Boolean).join(' · ');
     document.title = `${data.title} — Cine Local`;
+    renderInfo(data.info);
     openLink.href = data.url;
     state.url = data.url;
     player.replaceChildren(
@@ -1378,13 +1977,33 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
 
   async function toggleDone() {
     message.textContent = '';
+    // Série ainda não concluída: marca o episódio atual e o servidor devolve o próximo (`next`), que já abrimos.
+    const episodeMode = isTv && !state.done && state.season != null;
     try {
-      const item = await api('me/done', { method: 'POST', body: { type, id, done: !state.done } });
+      const item = await api('me/done', {
+        method: 'POST',
+        body: episodeMode ? { type, id, done: true, season: state.season, episode: state.episode } : { type, id, done: !state.done },
+      });
       state.done = item.done;
+      if (item.next) {
+        await moveTo(item.next.season, item.next.episode);
+        return;
+      }
       refreshControls();
     } catch (err) {
       message.textContent = err.message;
     }
+  }
+
+  // Vai para um episódio que pode ser de outra temporada (a lista de episódios da nova temporada precisa vir antes).
+  async function moveTo(season, episode) {
+    if (season !== state.season) {
+      state.season = season;
+      state.episodes = [];
+      await loadEpisodes(season);
+      if (token !== navToken) return;
+    }
+    goTo(season, episode);
   }
 
   async function loadEpisodes(season) {
@@ -1456,21 +2075,28 @@ function route() {
   document.title = 'Cine Local';
   window.scrollTo(0, 0);
 
-  const hash = location.hash || '#/';
+  // Filtros vão depois do `?` (busca e explorar); o resto do roteamento olha só o caminho.
+  const [hash, queryText = ''] = (location.hash || '#/').split('?');
+  const params = new URLSearchParams(queryText);
   let match;
 
   if ((match = hash.match(/^#\/decisao(?:\/([A-Za-z0-9._-]+))?$/))) {
     setActiveNav(null);
     return renderDecision(match[1], token);
   }
+  if ((match = hash.match(/^#\/redefinir(?:\/([A-Za-z0-9._-]+))?$/))) {
+    setActiveNav(null);
+    return renderReset(match[1]);
+  }
   if (hash === '#/creditos') {
     setActiveNav(null);
     return renderCredits();
   }
-  if (hash === '#/login' || hash === '#/cadastro') {
+  if (hash === '#/login' || hash === '#/cadastro' || hash === '#/esqueci') {
     setActiveNav(null);
     if (session.token) return location.replace('#/');
-    return hash === '#/login' ? renderLogin() : renderRegister();
+    if (hash === '#/login') return renderLogin();
+    return hash === '#/cadastro' ? renderRegister() : renderForgot();
   }
   if (!session.token) return location.replace('#/login');
   if (session.needsGenres && hash !== '#/generos') return location.replace('#/generos');
@@ -1485,10 +2111,30 @@ function route() {
     return renderList(match[1], token);
   }
   if ((match = hash.match(/^#\/busca\/(.+)$/))) {
-    const term = decodeURIComponent(match[1]);
+    let term;
+    try {
+      term = decodeURIComponent(match[1]);
+    } catch {
+      return location.replace('#/'); // endereço digitado à mão e malformado
+    }
     setActiveNav(null);
     if (document.activeElement !== searchInput) searchInput.value = term;
-    return renderSearch(term, token);
+    return renderSearch(term, params, token);
+  }
+  if (hash === '#/explorar') {
+    setActiveNav('explore');
+    searchInput.value = '';
+    return renderExplore(params, token);
+  }
+  if ((match = hash.match(/^#\/titulo\/(movie|tv)\/(\d{1,9})$/))) {
+    setActiveNav(null);
+    searchInput.value = '';
+    return renderTitle(match[1], match[2], token);
+  }
+  if (hash === '#/perfil') {
+    setActiveNav(null);
+    searchInput.value = '';
+    return renderAccount(token);
   }
   if (hash === '#/biblioteca') {
     setActiveNav('library');
@@ -1508,9 +2154,12 @@ function route() {
 
 let searchTimer = null;
 
+// Na tela de busca, uma nova palavra mantém os filtros que já estavam escolhidos.
 function goSearch() {
   const term = searchInput.value.trim();
-  if (term.length >= 2) location.hash = `#/busca/${encodeURIComponent(term)}`;
+  if (term.length < 2) return;
+  const filters = location.hash.startsWith('#/busca/') ? location.hash.split('?')[1] : '';
+  location.hash = `#/busca/${encodeURIComponent(term)}${filters ? `?${filters}` : ''}`;
 }
 
 searchInput.addEventListener('input', () => {

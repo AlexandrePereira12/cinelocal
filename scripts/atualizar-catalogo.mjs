@@ -18,8 +18,17 @@
  * - Formato: um item por linha (diff do git legível), campos nulos omitidos, sinopse cortada em 240 caracteres.
  *   Chaves curtas: i id · t título · ot título original · y ano · d data · p pôster · b backdrop · r nota ·
  *   n votos · v popularidade · o sinopse · rt duração (filme) · g ids de gênero (filme e série, cada um no seu
- *   conjunto de ids) · s temporadas [[número, episódios], ...] (série).
+ *   conjunto de ids) · s temporadas [[número, episódios], ...] (série) · a data em que o título entrou no catálogo.
  *   Topo do arquivo: `genres` (filme) e `tvGenres` (série) = { idDoGênero: "nome em pt-BR" }.
+ * - `a` (alimenta a fileira "Novidades da semana"): só id que NÃO estava na foto anterior ganha `a` = data da coleta; quem
+ *   já estava mantém o `a` que tinha, e `a` com mais de A_KEEP_DAYS dias é descartado (a fileira só olha a última semana,
+ *   guardar para sempre só incharia o arquivo). Se a foto anterior está vazia ou não existe, NADA ganha `a`: senão a
+ *   primeira execução marcaria o catálogo inteiro (~14,7 mil títulos) como novidade. Por isso, enquanto a foto atual
+ *   não tiver passado por uma segunda coleta, a fileira fica vazia (e a home esconde fileira vazia).
+ *   Limite conhecido: um id que falha no TMDB (o gate tolera até 2%) ou some da lista do embedplay numa semana sai da foto
+ *   e, ao voltar na seguinte, conta como "não estava na anterior" e aparece em "Novidades" uma vez. É cosmético (um
+ *   título antigo na fileira por uma semana) e consertar de verdade exigiria guardar entradas de fotos antigas
+ *   (decisão de produto: manter dado velho de título que falhou).
  * - Atualização automática: .github/workflows/atualizar-catalogo.yml roda este mesmo script toda semana no GitHub
  *   e, se o catálogo mudou, faz o commit (o Netlify publica sozinho). Se o embedplayapi recusar o IP do GitHub, o
  *   passo 1/3 falha com código ≠ 0 e o catálogo atual fica como está.
@@ -37,6 +46,7 @@ const IDS_TIMEOUT_MS = 180_000;
 const TMDB_TIMEOUT_MS = 20_000;
 const MAX_ATTEMPTS = 4;
 const OVERVIEW_MAX = 240;
+const A_KEEP_DAYS = 30;
 
 export const GATES = {
   maxFailedRatio: 0.02,
@@ -261,14 +271,40 @@ export function writeAtomic(file, content) {
   renameSync(tmp, file);
 }
 
-async function previousTotal(file) {
-  if (!existsSync(file)) return 0;
+// Foto anterior: total de títulos e, por "tipo:id", o `a` que cada um tinha (undefined = estava lá, sem data).
+async function loadPrevious(file) {
+  const empty = { total: 0, seen: new Map() };
+  if (!existsSync(file)) return empty;
   try {
     const mod = await import(`${pathToFileURL(file).href}?t=${randomUUID()}`); // sufixo único: o cache de módulos do Node não pode servir versão antiga
-    return (mod.default?.movies?.length ?? 0) + (mod.default?.series?.length ?? 0);
+    const seen = new Map();
+    for (const entry of mod.default?.movies ?? []) seen.set(`movie:${entry.i}`, entry.a);
+    for (const entry of mod.default?.series ?? []) seen.set(`tv:${entry.i}`, entry.a);
+    return { total: seen.size, seen };
   } catch {
-    return 0;
+    return empty;
   }
+}
+
+// Marca como novidade só o id que a foto anterior não tinha (regras no topo do arquivo). Devolve quantos ficaram com `a` de hoje.
+export function annotateNew(collected, previous, today) {
+  if (!previous.total) return 0;
+  const oldest = new Date(Date.parse(today) - A_KEEP_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  let added = 0;
+  const mark = (type, entries) => {
+    for (const entry of entries) {
+      const key = `${type}:${entry.i}`;
+      if (!previous.seen.has(key)) {
+        entry.a = today;
+        added++;
+      } else if (previous.seen.get(key) >= oldest) {
+        entry.a = previous.seen.get(key);
+      }
+    }
+  };
+  mark('movie', collected.movies);
+  mark('tv', collected.series);
+  return added;
 }
 
 export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_FILE, today = new Date().toISOString().slice(0, 10), sleep, log = console.log, concurrency, minIntervalMs }) {
@@ -294,19 +330,22 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
   const kept = collected.movies.length + collected.series.length;
 
   const genreCount = Object.keys(collected.genres).length;
-  const problems = checkGates({ stats, kept, previousTotal: await previousTotal(file), genreCount });
+  const previous = await loadPrevious(file);
+  const problems = checkGates({ stats, kept, previousTotal: previous.total, genreCount });
   if (problems.length) {
     const error = new Error(`snapshot rejeitado, o catálogo atual foi mantido:\n  - ${problems.join('\n  - ')}`);
     error.stats = stats;
     throw error;
   }
 
+  const novos = annotateNew(collected, previous, today);
   log('3/3 gravando…');
   writeAtomic(file, serialize({ generatedAt: new Date().toISOString(), genres: collected.genres, tvGenres: collected.tvGenres, movies: collected.movies, series: collected.series }));
   const summary = {
     filmes: collected.movies.length,
     series: collected.series.length,
     generos: genreCount,
+    novos,
     inexistentesNoTmdb: stats.notFound,
     falhas: stats.failed,
     descartados: stats.discarded,

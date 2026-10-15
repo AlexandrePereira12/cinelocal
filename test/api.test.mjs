@@ -15,6 +15,12 @@ const PROTECTED = [
   ['GET', '/api/me/preferences'],
   ['POST', '/api/me/preferences', { genres: [28, 18] }],
   ['GET', '/api/me/recommendations'],
+  ['GET', '/api/title/movie/777'],
+  ['GET', '/api/browse?type=movie'],
+  ['GET', '/api/browse/options'],
+  ['GET', '/api/me/account'],
+  ['POST', '/api/me/account', { name: 'Ana Souza' }],
+  ['POST', '/api/me/watchlist', { type: 'movie', id: '777', add: true }],
 ];
 
 const seconds = (app) => Math.floor(app.clock.ms / 1000);
@@ -337,7 +343,7 @@ test('histórico valida entrada e é isolado por usuário', async () => {
 
   await play(a.token, { type: 'movie', id: '1', title: 'Só da Ana' });
   const libB = await app.call('GET', '/api/me/library', { token: b.token });
-  assert.deepEqual(libB.body, { continue: [], watched: [] });
+  assert.deepEqual(libB.body, { continue: [], watched: [], watchlist: [] });
 });
 
 test('histórico tem teto e descarta os mais antigos', async () => {
