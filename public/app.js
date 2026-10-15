@@ -1825,6 +1825,46 @@ function openCastDialog(cast) {
   });
 }
 
+// --- proteção contra anúncios: `sandbox` do iframe do player ---
+// O player é de outro domínio: o site não vê nem intercepta o clique que abre o anúncio. O único freio do navegador é o
+// `sandbox`, que tira do iframe a permissão de abrir abas e de navegar a página principal. Mas o provedor já se
+// recusou a tocar sob sandbox (commit c928eb5, "remova o Sandbox"), então o padrão é DESLIGADO e cada aparelho liga
+// a variação que o provedor aceitar, na própria tela do filme (fica em localStorage). Ninguém lê de dentro do iframe se
+// ele foi aceito: quem decide é a pessoa, vendo o vídeo tocar. Para virar padrão, troque `DEFAULT_SANDBOX` quando uma
+// variação for validada com o player no ar.
+// Nenhuma variação pode ter allow-top-navigation* nem allow-popups-to-escape-sandbox: seriam o oposto da proteção
+// (test/ad-protection.test.mjs trava isso).
+const SANDBOX_MODES = {
+  off: {
+    label: 'Desligada (como o player vem)',
+    flags: null,
+    hint: 'O player roda sem restrição: anúncios podem abrir abas e redirecionar a página.',
+  },
+  block: {
+    label: 'Bloquear abas e redirecionamentos',
+    flags: 'allow-scripts allow-same-origin allow-presentation',
+    hint: 'Impede o player de abrir abas e de mandar a página para outro site. Se o player não tocar ou pedir para remover o sandbox, volte para “Desligada”.',
+  },
+  'block-forms': {
+    label: 'Bloquear (com formulários)',
+    flags: 'allow-scripts allow-same-origin allow-presentation allow-forms',
+    hint: 'Igual a “Bloquear”, mas deixa o player enviar formulários. Foi a variação testada em 12/10.',
+  },
+  'redirect-only': {
+    label: 'Só impedir redirecionamento',
+    flags: 'allow-scripts allow-same-origin allow-presentation allow-popups',
+    hint: 'NÃO impede abas: elas abrem, só que isoladas (sem acesso ao site). Bloqueia apenas o redirecionamento da página.',
+  },
+};
+const DEFAULT_SANDBOX = 'off';
+
+function loadSandboxMode() {
+  const mode = readStore('cine.sandbox').mode;
+  return typeof mode === 'string' && Object.hasOwn(SANDBOX_MODES, mode) ? mode : DEFAULT_SANDBOX;
+}
+
+let sandboxMode = loadSandboxMode();
+
 // --- trava do "voltar" na tela do filme ---
 // No celular o gesto de voltar (borda da tela) é fácil de acionar sem querer e tira a pessoa do filme; ao reabrir, o
 // player recomeça e os anúncios vêm de novo. Ao abrir a tela empilha-se uma entrada igual à atual (a "guarda"): o
@@ -1858,6 +1898,7 @@ function onWatchGuardPop(event) {
   confirmDialog('Sair do player?', 'Se sair, o player recarrega e os anúncios podem aparecer de novo.', 'Sair', 'Continuar assistindo').then((leave) => {
     leavePrompt = false;
     if (!leave || !watchGuard) return;
+    watchGuard.leaving = true; // a pessoa já confirmou: o beforeunload não pergunta de novo
     // Pilha: [..., anterior, tela, guarda]. Sem entrada anterior (link aberto direto) não há para onde voltar: vai ao início.
     if (history.length > 2) history.go(-2);
     else location.replace('#/');
@@ -1865,6 +1906,20 @@ function onWatchGuardPop(event) {
 }
 
 window.addEventListener('popstate', onWatchGuardPop);
+
+// Guarda contra sequestro da página: se o player (ou um anúncio dentro dele) mandar a página inteira para outro site,
+// o navegador pergunta antes de sair. Vale só na tela do filme (`watchGuard`). É a defesa que funciona mesmo sem sandbox.
+// Limites: o navegador só pergunta se a pessoa já interagiu com a página (um clique no player conta); a pergunta também
+// aparece ao fechar a aba ou recarregar (não dá para distinguir de um redirecionamento); o Safari do iOS ignora.
+// A saída que a própria pessoa confirmou em "Sair do player?" marca `leaving` para não perguntar uma segunda vez
+// quando o voltar cai em outro documento.
+function onWatchBeforeUnload(event) {
+  if (!watchGuard || watchGuard.leaving) return;
+  event.preventDefault();
+  event.returnValue = ''; // exigido por navegadores mais antigos; o texto da pergunta é sempre o do navegador
+}
+
+window.addEventListener('beforeunload', onWatchBeforeUnload);
 
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const isTv = type === 'tv';
@@ -1921,6 +1976,20 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       ),
     );
   }
+  const sandboxHint = el('p', { class: 'note' }, SANDBOX_MODES[sandboxMode].hint);
+  const sandboxSelect = el(
+    'select',
+    {
+      id: 'sandbox-mode',
+      onchange: () => {
+        sandboxMode = sandboxSelect.value;
+        writeStore('cine.sandbox', { mode: sandboxMode });
+        sandboxHint.textContent = SANDBOX_MODES[sandboxMode].hint;
+        loadFrame();
+      },
+    },
+    ...Object.entries(SANDBOX_MODES).map(([value, mode]) => el('option', { value, selected: value === sandboxMode }, mode.label)),
+  );
   page.append(
     info,
     message,
@@ -1928,6 +1997,14 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       'p',
       { class: 'note' },
       'Se um anúncio abrir em outra aba, feche e volte. Bloqueadores de anúncio impedem o player de tocar.',
+    ),
+    el(
+      'details',
+      { class: 'ad-protect' },
+      el('summary', {}, 'Proteção contra anúncios (experimental)'),
+      el('div', { class: 'controls' }, el('label', { for: 'sandbox-mode' }, 'Modo'), sandboxSelect),
+      sandboxHint,
+      el('p', { class: 'note' }, 'Se o player parar de tocar depois de mudar o modo, volte para “Desligada” ou use “Assistir em nova aba”.'),
     ),
   );
   app.replaceChildren(page);
@@ -2006,7 +2083,8 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     player.replaceChildren(
       el('iframe', {
         src: data.url,
-        // Sem `sandbox` de propósito: o player do provedor detecta e se recusa a tocar ("remova o Sandbox").
+        // `sandbox` só se a pessoa ligou (padrão desligado): o player do provedor já se recusou a tocar sob sandbox.
+        sandbox: SANDBOX_MODES[sandboxMode].flags,
         allowfullscreen: true,
         allow: 'autoplay; fullscreen; encrypted-media; picture-in-picture',
         title: data.title,
