@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { checkGates, collect, compactMovie, compactSeries, loadAvailableIds, refreshCatalog, serialize } from '../scripts/atualizar-catalogo.mjs';
+import { annotateNew, checkGates, collect, compactMovie, compactSeries, loadAvailableIds, refreshCatalog, serialize } from '../scripts/atualizar-catalogo.mjs';
 
 const noSleep = async () => {};
 const TODAY = '2026-10-11';
@@ -216,4 +216,56 @@ test('serialize gera JS válido mesmo com aspas e caracteres especiais no títul
   assert.equal(mod.default.movies[0].t, tricky.t);
   assert.deepEqual(mod.default.genres, { 18: 'Drama', 28: 'Ação' });
   assert.deepEqual(mod.default.tvGenres, { 10759: 'Ação e Aventura' });
+});
+
+test('annotateNew: só id novo ganha `a`, quem já estava mantém o seu e `a` velho some', () => {
+  const previous = {
+    total: 4,
+    seen: new Map([
+      ['movie:1', undefined], // estava na foto anterior, sem data
+      ['movie:2', '2026-10-10'], // novidade de 8 dias atrás: mantém
+      ['tv:9', '2026-08-01'], // mais de 30 dias: a data é descartada
+      ['movie:5', undefined],
+    ]),
+  };
+  const collected = { movies: [{ i: 1 }, { i: 2 }, { i: 3 }, { i: 9 }], series: [{ i: 9 }, { i: 7 }] };
+  const added = annotateNew(collected, previous, '2026-10-18');
+  assert.equal(added, 3, 'novos: filme 3, filme 9 e série 7');
+  assert.deepEqual(collected.movies, [{ i: 1 }, { i: 2, a: '2026-10-10' }, { i: 3, a: '2026-10-18' }, { i: 9, a: '2026-10-18' }], 'o filme 9 é novo mesmo existindo uma série 9: o tipo faz parte da chave');
+  assert.deepEqual(collected.series, [{ i: 9 }, { i: 7, a: '2026-10-18' }]);
+});
+
+test('annotateNew: primeira foto (anterior vazia ou ausente) não marca nada como novidade', () => {
+  const collected = { movies: [{ i: 1 }], series: [{ i: 2 }] };
+  assert.equal(annotateNew(collected, { total: 0, seen: new Map() }, '2026-10-18'), 0);
+  assert.deepEqual(collected, { movies: [{ i: 1 }], series: [{ i: 2 }] });
+});
+
+test('refreshCatalog: a 1ª coleta não marca novidade; as seguintes marcam só o que chegou e esquecem o que ficou velho', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'catalogo-'));
+  const file = join(dir, 'catalogo.mjs');
+  const run = async (movies, series, today, version) => {
+    const world = fakeWorld({ movies, series });
+    const summary = await refreshCatalog({ token: 'T', file, today, sleep: noSleep, minIntervalMs: 0, log: () => {}, fetchImpl: world.fetchImpl });
+    const mod = await import(`${pathToFileURL(file).href}?n=${version}`);
+    const dates = (list) => Object.fromEntries(list.map((entry) => [entry.i, entry.a]));
+    return { summary, movies: dates(mod.default.movies), series: dates(mod.default.series) };
+  };
+  const base = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  const first = await run(base, [20, 21], '2026-10-04', 'a');
+  assert.equal(first.summary.novos, 0);
+  assert.ok([...Object.values(first.movies), ...Object.values(first.series)].every((a) => a === undefined), 'nenhum `a` na primeira foto');
+
+  const second = await run([...base, 11, 12], [20, 21, 22], '2026-10-11', 'b');
+  assert.equal(second.summary.novos, 3);
+  assert.deepEqual([second.movies[1], second.movies[11], second.movies[12], second.series[20], second.series[22]], [undefined, '2026-10-11', '2026-10-11', undefined, '2026-10-11']);
+
+  const third = await run([...base, 11, 12, 13], [20, 21, 22], '2026-10-18', 'c');
+  assert.equal(third.summary.novos, 1);
+  assert.deepEqual([third.movies[11], third.movies[13], third.series[22]], ['2026-10-11', '2026-10-18', '2026-10-11'], 'quem já era novidade mantém a data');
+
+  const later = await run([...base, 11, 12, 13], [20, 21, 22], '2026-12-01', 'd');
+  assert.equal(later.summary.novos, 0);
+  assert.ok(Object.values(later.movies).every((a) => a === undefined), 'passou de 30 dias: a data sai do arquivo');
 });
