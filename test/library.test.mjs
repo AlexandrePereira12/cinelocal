@@ -262,3 +262,151 @@ test('busca: aceita filtro de tipo e de ano e recusa valor inválido', async () 
   assert.deepEqual(app.catalog.calls.at(-1), ['search', 'matrix'], '"todos" é o mesmo que sem filtro');
   for (const bad of ['&type=anime', '&from=abc', '&from=2010&to=2000']) assert.equal((await get(bad)).status, 400, bad);
 });
+
+// --- selo "Novo episódio" ---
+
+const uidOf = (token) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub;
+const stored = async (app, token, key) => (await app.stores.library.get(uidOf(token))).value.items[key];
+// A série 300 do fake tem S1 com 2 episódios e S2 com 1 (3 no total); isto acrescenta um episódio à S2 (vira 4).
+const addEpisode = (app) => {
+  app.catalog.state.shows[300] = [[1, 2], [2, 2]];
+};
+
+test('selo novo episódio: guarda o total ao abrir/marcar e só mostra quando o catálogo ganha episódio', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'tv', id: '300', season: 1, episode: 1 });
+  assert.equal((await stored(app, token, 'tv:300')).seenTotal, 3);
+  assert.equal((await library(app, token)).continue[0].fresh, undefined, 'sem episódio novo, sem selo (e o campo nem aparece)');
+  assert.ok(!('fresh' in (await library(app, token)).continue[0]));
+
+  addEpisode(app);
+  const lib = await library(app, token);
+  assert.equal(lib.continue[0].fresh, true);
+  assert.deepEqual([lib.continue[0].season, lib.continue[0].episode, lib.continue[0].done], [1, 1, false], 'em andamento: a posição continua a mesma');
+
+  await play(app, token, { type: 'tv', id: '300', season: 1, episode: 1 });
+  assert.equal((await stored(app, token, 'tv:300')).seenTotal, 4, 'interagir atualiza o total visto');
+  assert.ok(!('fresh' in (await library(app, token)).continue[0]), 'visto o novo total, o selo some');
+
+  addEpisode(app);
+  app.catalog.state.shows[300] = [[1, 2], [2, 3]];
+  assert.equal((await library(app, token)).continue[0].fresh, true);
+  await done(app, token, { type: 'tv', id: '300', done: true, season: 1, episode: 1 });
+  assert.equal((await stored(app, token, 'tv:300')).seenTotal, 5, 'marcar como assistido também atualiza o total');
+  assert.ok(!('fresh' in (await library(app, token)).continue[0]));
+});
+
+test('selo novo episódio: item antigo (sem total), série fora do catálogo e filme nunca ganham selo', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  const item = (type, id, extra = {}) => ({ type, id, title: `T${id}`, year: '2000', poster: null, season: type === 'tv' ? 1 : null, episode: type === 'tv' ? 1 : null, done: false, lastViewedAt: '2026-01-01T00:00:00.000Z', ...extra });
+  await app.stores.library.create(uidOf(token), {
+    items: { 'tv:300': item('tv', '300'), 'tv:10': item('tv', '10', { seenTotal: 1 }), 'movie:777': item('movie', '777', { seenTotal: 1 }) },
+  });
+  addEpisode(app);
+  const lib = await library(app, token);
+  assert.equal(lib.continue.length, 3);
+  assert.ok(lib.continue.every((i) => !('fresh' in i)), 'sem total guardado, fora do catálogo ou filme: sem selo');
+});
+
+test('selo novo episódio: série concluída com episódio novo volta para "continuar" apontando o episódio novo, sem gravar nada', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'tv', id: '300', season: 2, episode: 1 });
+  const last = await done(app, token, { type: 'tv', id: '300', done: true, season: 2, episode: 1 });
+  assert.equal(last.body.done, true);
+  let lib = await library(app, token);
+  assert.deepEqual([lib.continue.length, lib.watched.map((i) => i.id)], [0, ['300']]);
+
+  addEpisode(app);
+  const before = structuredClone((await app.stores.library.get(uidOf(token))).value);
+  lib = await library(app, token);
+  assert.deepEqual(lib.watched, [], 'não fica mais em assistidos');
+  assert.deepEqual(lib.continue.map((i) => [i.id, i.season, i.episode, i.done, i.fresh]), [['300', 2, 2, false, true]]);
+  assert.deepEqual((await app.stores.library.get(uidOf(token))).value, before, 'a leitura não persiste nada');
+  assert.equal((await stored(app, token, 'tv:300')).done, true, 'o registro continua "concluída" até alguém abrir o episódio novo');
+});
+
+test('selo novo episódio: com episódio novo mas sem próximo episódio calculável, a série continua concluída', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  const stale = { type: 'tv', id: '300', title: 'S', year: '2022', poster: null, season: 2, episode: 1, done: true, doneAt: '2026-01-02T00:00:00.000Z', seenTotal: 1, lastViewedAt: '2026-01-01T00:00:00.000Z' };
+  await app.stores.library.create(uidOf(token), { items: { 'tv:300': stale } });
+  // Total atual (3) > visto (1), mas depois de S2E1 não há mais nada: nextEpisode = null, então não é "novo".
+  const lib = await library(app, token);
+  assert.deepEqual([lib.continue.length, lib.watched.map((i) => i.id)], [0, ['300']]);
+  assert.ok(!('fresh' in lib.watched[0]));
+});
+
+test('série concluída: rever episódio (antigo ou o último) ou abrir sem episódio não desfaz o "concluída"', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'tv', id: '300', season: 2, episode: 1 });
+  await done(app, token, { type: 'tv', id: '300', done: true, season: 2, episode: 1 });
+  const doneAt = (await stored(app, token, 'tv:300')).doneAt;
+  assert.ok(doneAt);
+
+  await play(app, token, { type: 'tv', id: '300', season: 2, episode: 1 });
+  assert.deepEqual([(await stored(app, token, 'tv:300')).done, (await stored(app, token, 'tv:300')).doneAt], [true, doneAt], 'reabrir o último episódio');
+  await play(app, token, { type: 'tv', id: '300' });
+  assert.equal((await stored(app, token, 'tv:300')).done, true, 'sem episódio no pedido, vale o salvo');
+  await play(app, token, { type: 'tv', id: '300', season: 1, episode: 1 });
+  assert.deepEqual([(await stored(app, token, 'tv:300')).done, (await stored(app, token, 'tv:300')).doneAt], [true, doneAt], 'rever um episódio antigo');
+  assert.equal((await library(app, token)).watched[0].id, '300');
+});
+
+test('série concluída com episódio novo: rever um episódio antigo mantém posição e selo, e o player toca o episódio pedido', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'tv', id: '300', season: 2, episode: 1 });
+  await done(app, token, { type: 'tv', id: '300', done: true, season: 2, episode: 1 });
+  addEpisode(app);
+
+  const replay = await play(app, token, { type: 'tv', id: '300', season: 1, episode: 1 });
+  assert.match(replay.body.url, /\/300\/1\/1$/, 'toca o episódio pedido');
+  assert.deepEqual([replay.body.season, replay.body.episode], [1, 1]);
+  const kept = await stored(app, token, 'tv:300');
+  assert.deepEqual([kept.season, kept.episode, kept.done], [2, 1, true], 'o registro não anda');
+  const lib = await library(app, token);
+  assert.deepEqual(lib.continue.map((i) => [i.id, i.season, i.episode, i.fresh]), [['300', 2, 2, true]], 'o selo continua');
+
+  const detail = await app.call('GET', '/api/title/tv/300', { token });
+  assert.deepEqual(detail.body.progress, { season: 2, episode: 2, done: false, fresh: true }, 'o detalhe concorda com a biblioteca');
+});
+
+test('abrir o episódio novo (o seguinte ao último concluído) reabre a série e tira a data de conclusão', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'tv', id: '300', season: 2, episode: 1 });
+  await done(app, token, { type: 'tv', id: '300', done: true, season: 2, episode: 1 });
+  addEpisode(app);
+
+  const reopened = await play(app, token, { type: 'tv', id: '300', season: 2, episode: 2 });
+  assert.equal(reopened.body.done, false);
+  assert.equal(reopened.body.url, 'https://embedplayapi.top/embed/300/2/2');
+  const record = await stored(app, token, 'tv:300');
+  assert.equal(record.done, false);
+  assert.ok(!('doneAt' in record), 'a data de conclusão sai junto');
+  assert.equal(record.seenTotal, 4);
+  const lib = await library(app, token);
+  assert.deepEqual(lib.continue.map((i) => [i.id, i.season, i.episode, i.done]), [['300', 2, 2, false]]);
+  assert.deepEqual(lib.watched, []);
+  assert.ok(!('fresh' in lib.continue[0]), 'já viu o total atual');
+});
+
+test('reabrir série concluída não vale para filme nem para série fora do catálogo', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  await play(app, token, { type: 'movie', id: '777' });
+  await done(app, token, { type: 'movie', id: '777', done: true });
+  await play(app, token, { type: 'movie', id: '777' });
+  assert.equal((await stored(app, token, 'movie:777')).done, true, 'filme assistido continua assistido');
+
+  await play(app, token, { type: 'tv', id: '10', season: 1, episode: 1, title: 'Fora' });
+  await done(app, token, { type: 'tv', id: '10', done: true });
+  await play(app, token, { type: 'tv', id: '10', season: 1, episode: 2 });
+  const record = await stored(app, token, 'tv:10');
+  assert.equal(record.done, true, 'sem catálogo não há como saber qual é o próximo episódio');
+  assert.ok(!('seenTotal' in record));
+});

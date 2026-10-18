@@ -38,6 +38,16 @@
  *   na lista). Os filmes saem do melhor avaliado para o pior, mas em 3 faixas: nota com votos suficientes
  *   (RATING_FILTER_MIN_VOTES, a mesma régua do filtro de nota), depois nota com poucos votos e por último sem nota.
  *   Ordenar só pela nota poria um filme com 3 votos e nota 9 acima de um clássico de 8,5 com milhares de votos.
+ * - Sorteio (`pick`): candidato = nota >= 6.5 com >= 300 votos, fora do que a pessoa já abriu (`exclude`) e do que já foi sugerido
+ *   (`skip`). Duração máxima só admite filme (série não tem duração). Gêneros são preferência, não filtro duro: sem nenhum
+ *   candidato no gênero, sorteia sem ele. Sorteia entre os 200 mais populares do que sobrou, para o resultado ser conhecido sem
+ *   ser sempre o mesmo, e `random` é injetado para o teste ser determinista.
+ * - Pedido de título (`hasTitle`): igualdade do título (ou do original) normalizado, nunca "começa com", senão "Duna"
+ *   acharia "Duna: Parte Dois" e o pedido seria recusado por engano.
+ * - Modo família (`forRating`): a visão é um catálogo comum criado sobre o snapshot filtrado (classificação `c` conhecida e <= limite),
+ *   então TODOS os métodos respeitam o filtro sem que cada um precise lembrar dele. Sem `c` fica de fora de propósito (conservador);
+ *   visão vazia responde lista vazia (e não 503) porque o 503 é do catálogo, não do filtro.
+ * - `episodeCount` alimenta o selo "Novo episódio" (a biblioteca compara o total de hoje com o visto).
  * - `nextEpisode` decide o "próximo episódio" no servidor com a mesma contagem do TMDB, para o front não precisar
  *   mandar a lista de episódios.
  */
@@ -72,6 +82,9 @@ const SHORT_MOVIE_MIN_VOTES = 500;
 const CLASSIC_BEFORE_YEAR = 1990;
 const CLASSIC_MIN_VOTES = 1000;
 const CLASSIC_MIN_RATING = 7;
+const PICK_MIN_RATING = 6.5; // o sorteio é "o que ver agora": só entra título com nota decente e votos suficientes para a nota valer
+const PICK_MIN_VOTES = 300;
+const PICK_POOL = 200; // o sorteio escolhe entre os mais populares do que sobrou, não no catálogo inteiro
 
 // Gênero de filme -> gêneros de série equivalentes (ids do TMDB TV). Os que não aparecem aqui não têm equivalente em série.
 const TV_EQUIVALENTS = {
@@ -118,13 +131,16 @@ function interleave(movies, shows) {
   return (movies[0]?.entry.v ?? -1) >= (shows[0]?.entry.v ?? -1) ? zip(movies, shows) : zip(shows, movies);
 }
 
-const normalize = (text) =>
+// Minúsculas, sem acento e sem pontuação. Exportado porque o pedido de título (handler.mjs) usa a MESMA regra para montar a
+// chave do pedido e para o catálogo decidir se o título já existe (duas réguas diferentes deixariam pedido passar por título que existe).
+export const normalizeTitle = (text) =>
   String(text ?? '')
     .normalize('NFD')
     .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
+const normalize = normalizeTitle;
 
 const byDesc = (key) => (a, b) => (b[key] ?? 0) - (a[key] ?? 0);
 const yearOf = (entry) => (entry.y ? Number(entry.y) : NaN);
@@ -162,7 +178,9 @@ function passesFilters(entry, { from = null, to = null, minRating = null }) {
   return true;
 }
 
-export function createCatalog({ data, now = Date.now }) {
+// `full` é o snapshot sem filtro: só serve para decidir "catálogo vazio" (503). Uma visão do modo família criada sobre um
+// snapshot filtrado que ficou vazio (ex.: classificação ainda não coletada) responde listas vazias, não "rode o script".
+export function createCatalog({ data, now = Date.now, full = data }) {
   const movies = data?.movies ?? [];
   const series = data?.series ?? [];
   const seriesById = new Map(series.map((entry) => [String(entry.i), entry]));
@@ -185,6 +203,7 @@ export function createCatalog({ data, now = Date.now }) {
   const genreOptions = optionsFor(data?.genres, movies);
   const tvGenreOptions = optionsFor(data?.tvGenres, series);
   const genreNames = { movie: data?.genres ?? {}, tv: data?.tvGenres ?? {} };
+  const genresOf = (type, entry) => (entry.g ?? []).map((genreId) => genreNames[type][genreId]).filter(Boolean);
 
   // Diretores: id da pessoa -> filmes do catálogo que ela dirigiu (já do melhor avaliado para o pior).
   const directorData = data?.directors ?? {};
@@ -259,8 +278,20 @@ export function createCatalog({ data, now = Date.now }) {
     return { ...row, title, titleWords: title.split(' '), words: normalize(`${row.entry.t} ${row.entry.ot ?? ''}`).split(' ') };
   });
 
+  // Título (ou título original) normalizado INTEIRO -> linhas do catálogo, para `hasTitle` (igualdade exata, não começo de palavra).
+  const exactTitles = new Map();
+  for (const row of searchIndex) {
+    for (const key of new Set([row.title, normalize(row.entry.ot)].filter(Boolean))) {
+      if (!exactTitles.has(key)) exactTitles.set(key, []);
+      exactTitles.get(key).push(row);
+    }
+  }
+
+  // Visões do modo família, uma por classificação máxima (são no máximo 5 valores, então a memória é irrelevante).
+  const views = new Map();
+
   function requireData() {
-    if (!movies.length && !series.length) {
+    if (!full?.movies?.length && !full?.series?.length) {
       throw new HttpError(503, 'O catálogo ainda não foi gerado. Rode o script de atualização e publique de novo.', 'catalog_empty');
     }
   }
@@ -290,14 +321,14 @@ export function createCatalog({ data, now = Date.now }) {
   function info(type, id) {
     const entry = entryOf(type, id);
     if (!entry) return null;
-    const names = genreNames[type];
     return {
       overview: entry.o ?? null,
       rating: entry.r ?? null,
       votes: entry.n ?? null,
       runtime: entry.rt ?? null,
       originalTitle: entry.ot ?? null,
-      genres: (entry.g ?? []).map((genreId) => names[genreId]).filter(Boolean),
+      genres: genresOf(type, entry),
+      certification: entry.c ?? null,
       seasons: type === 'tv' ? (entry.s ?? []).length : null,
       episodes: type === 'tv' ? totalEpisodes(entry) : null,
     };
@@ -318,7 +349,7 @@ export function createCatalog({ data, now = Date.now }) {
     return scored.slice(0, limit).map(({ other }) => toItem(type, other));
   }
 
-  return {
+  const catalog = {
     // Opções para a escolha de gêneros favoritos (vazio = catálogo sem gêneros: o recurso fica desligado).
     genres() {
       return genreOptions.map((genre) => ({ ...genre }));
@@ -476,5 +507,65 @@ export function createCatalog({ data, now = Date.now }) {
       const entry = entryOf(type, id);
       return entry ? toItem(type, entry) : null;
     },
+
+    // Total de episódios da série hoje (null = fora do catálogo). A biblioteca guarda esse total a cada interação para
+    // saber, depois, se a série ganhou episódio ("Novo episódio").
+    episodeCount(id) {
+      const entry = seriesById.get(String(id));
+      return entry ? totalEpisodes(entry) : null;
+    },
+
+    // "Não sei o que ver": um título sorteado entre os mais populares que passam na régua de qualidade. `exclude` = o que a
+    // pessoa já abriu; `skip` = o que já foi sugerido nesta rodada. `random` é injetado para o teste ser determinista.
+    // Com duração máxima só entram filmes (série não tem duração no catálogo). Gêneros são só preferência: se nenhum
+    // candidato casa, sorteia sem gênero em vez de responder "nada".
+    pick({ genreIds = null, exclude = new Set(), skip = new Set(), maxMinutes = null, type = 'all', random = Math.random } = {}) {
+      requireData();
+      const candidates = [];
+      const add = (rowType, entries) => {
+        for (const entry of entries) {
+          const key = `${rowType}:${entry.i}`;
+          if (!(entry.r != null && entry.r >= PICK_MIN_RATING && (entry.n ?? 0) >= PICK_MIN_VOTES)) continue;
+          if (exclude.has(key) || skip.has(key)) continue;
+          if (maxMinutes !== null && !(entry.rt > 0 && entry.rt <= maxMinutes)) continue;
+          candidates.push({ type: rowType, entry });
+        }
+      };
+      if (type !== 'tv') add('movie', moviesByPopularity);
+      if (type !== 'movie' && maxMinutes === null) add('tv', seriesByPopularity);
+      candidates.sort((a, b) => (b.entry.v ?? 0) - (a.entry.v ?? 0));
+
+      const liked = genreIds?.length ? candidates.filter(({ type: rowType, entry }) => genreIds.some((genreId) => fits(rowType, entry, genreId))) : [];
+      const pool = (liked.length ? liked : candidates).slice(0, PICK_POOL);
+      if (!pool.length) return null;
+      const { type: rowType, entry } = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))];
+      return { ...toItem(rowType, entry), genres: genresOf(rowType, entry), certification: entry.c ?? null };
+    },
+
+    // Pedido de título: o catálogo já tem esse título? Igualdade do título (ou do original) normalizado, não "começa com":
+    // "Duna" não é "Duna: Parte Dois". `type` 'any'/omitido vale para os dois tipos; `year`, se dado, tem que bater.
+    // Havendo mais de um, o mais popular.
+    hasTitle(title, { type = 'any', year = null } = {}) {
+      const rows = (exactTitles.get(normalize(title)) ?? []).filter(
+        (row) => (type == null || type === 'any' || row.type === type) && (year == null || String(row.entry.y) === String(year)),
+      );
+      if (!rows.length) return null;
+      const best = rows.reduce((top, row) => ((row.entry.v ?? 0) > (top.entry.v ?? 0) ? row : top));
+      return toItem(best.type, best.entry);
+    },
+
+    // Modo família: a mesma API sobre um snapshot que só tem título com classificação indicativa conhecida e <= `max`.
+    // Título sem classificação (`c` ausente) fica DE FORA de propósito: se a pessoa ligou o modo para uma criança usar o
+    // aparelho, na dúvida esconde. Memoizada por valor, porque cada visão reconstrói índices e listas. Sem limite (null)
+    // devolve o próprio catálogo. Uma visão de uma visão só restringe mais (o snapshot dela já é filtrado).
+    forRating(max) {
+      if (max == null) return catalog;
+      if (!views.has(max)) {
+        const allowed = (entry) => Number.isFinite(entry.c) && entry.c <= max;
+        views.set(max, createCatalog({ data: { ...data, movies: movies.filter(allowed), series: series.filter(allowed) }, now, full }));
+      }
+      return views.get(max);
+    },
   };
+  return catalog;
 }

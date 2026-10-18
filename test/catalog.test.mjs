@@ -181,3 +181,217 @@ test('recomendação: sem nenhum título do gênero devolve listas vazias', () =
   assert.deepEqual(catalog.recommend([99, 37]), { first: [], second: [], both: [] });
 });
 
+
+// --- sorteio, pedido de título, episódios e modo família ---
+
+const RICH_NOW = Date.parse('2026-10-11T12:00:00Z');
+const rich = {
+  generatedAt: '2026-10-01T00:00:00Z',
+  genres: { 28: 'Ação', 18: 'Drama', 35: 'Comédia', 27: 'Terror', 99: 'Documentário' },
+  tvGenres: { 10759: 'Action & Adventure', 35: 'Comédia' },
+  directors: { 900: { n: 'Diretora Rica', p: '/d900.jpg' } },
+  movies: [
+    movie(1, 'Aventura Alta', { v: 100, n: 1000, r: 8.0, rt: 90, g: [28], c: 12, a: '2026-09-30', dr: [900], d: '2026-10-15' }),
+    movie(2, 'Comédia Leve', { v: 90, n: 500, r: 7.0, rt: 120, g: [35], c: 0, ot: 'Light Comedy', dr: [900] }),
+    movie(3, 'Drama Longo', { v: 80, n: 2000, r: 7.5, rt: 180, g: [18], c: 16, dr: [900] }),
+    movie(4, 'Terror Famoso', { v: 200, n: 5000, r: 6.4, rt: 100, g: [27], c: 18 }),
+    movie(5, 'Poucos Votos', { v: 300, n: 299, r: 9.0, rt: 90, g: [28], c: 0 }),
+    movie(6, 'Sem Duração', { v: 70, n: 400, r: 7.0, rt: undefined, g: [28] }),
+    movie(7, 'Limite', { v: 60, n: 300, r: 6.5, rt: 60, g: [35], c: 10 }),
+  ],
+  series: [
+    { i: 10, t: 'Série Boa', y: '2019', p: '/s10.jpg', v: 95, n: 900, r: 8, g: [10759], s: [[1, 3], [2, 2]], c: 14 },
+    { i: 11, t: 'Série Fraca', y: '2020', v: 500, n: 1000, r: 6, g: [35], s: [[1, 4]], c: 0 },
+    { i: 12, t: 'Série Comédia', y: '2021', v: 50, n: 400, r: 7, g: [35], s: [[1, 5]], c: 10 },
+    { i: 13, t: 'Série Vazia', y: '2021', v: 1, n: 1, g: [35], s: [] },
+  ],
+};
+const richCatalog = createCatalog({ data: rich, now: () => RICH_NOW });
+const key = (item) => `${item.type}:${item.id}`;
+// Candidatos do sorteio por popularidade: movie 1 (100), tv 10 (95), movie 2 (90), movie 3 (80), movie 6 (70), movie 7 (60), tv 12 (50).
+const POOL_ORDER = ['movie:1', 'tv:10', 'movie:2', 'movie:3', 'movie:6', 'movie:7', 'tv:12'];
+
+test('episodeCount: soma as temporadas; fora do catálogo = null; sem episódios = 0', () => {
+  assert.equal(richCatalog.episodeCount('10'), 5);
+  assert.equal(richCatalog.episodeCount('13'), 0);
+  assert.equal(richCatalog.episodeCount('9999'), null);
+  assert.equal(richCatalog.episodeCount('1'), null, 'filme não é série');
+});
+
+test('sorteio: só nota >= 6.5 com >= 300 votos, escolhe pela posição sorteada entre os mais populares', () => {
+  const picked = (random, options = {}) => richCatalog.pick({ random: () => random, ...options });
+  assert.equal(key(picked(0)), 'movie:1', 'random 0 = o mais popular');
+  assert.equal(key(picked(0.5)), 'movie:3', 'floor(0.5 * 7) = 3');
+  assert.equal(key(picked(0.999999)), 'tv:12', 'random perto de 1 = o último candidato');
+  const everyone = POOL_ORDER.map((_, k) => key(picked(k / POOL_ORDER.length)));
+  assert.deepEqual(everyone, POOL_ORDER, 'terror (nota 6.4), poucos votos (299), série fraca e série vazia nunca entram; 6.5 e 300 votos entram');
+
+  const first = picked(0);
+  assert.deepEqual(first, { id: '1', type: 'movie', title: 'Aventura Alta', year: '2020', poster: '/p1.jpg', backdrop: '/b1.jpg', overview: 'Sinopse', rating: 8, runtime: 90, genres: ['Ação'], certification: 12 });
+  assert.deepEqual(picked(0.2).genres, ['Action & Adventure'], 'série usa os nomes de gênero de série');
+});
+
+test('sorteio: exclude (já abertos) e skip (já sugeridos) tiram o título; sem candidato = null', () => {
+  assert.equal(key(richCatalog.pick({ random: () => 0, exclude: new Set(['movie:1']) })), 'tv:10');
+  assert.equal(key(richCatalog.pick({ random: () => 0, skip: new Set(['movie:1', 'tv:10']) })), 'movie:2');
+  assert.equal(richCatalog.pick({ exclude: new Set(POOL_ORDER) }), null);
+  assert.equal(richCatalog.pick({ skip: new Set(POOL_ORDER) }), null);
+  const seen = new Set();
+  for (let i = 0; i < POOL_ORDER.length; i++) seen.add(key(richCatalog.pick({ skip: seen })));
+  assert.equal(seen.size, POOL_ORDER.length, 'pedindo com skip acumulado, cada sorteio traz um título novo até acabar');
+  assert.equal(richCatalog.pick({ skip: seen }), null);
+  assert.ok(POOL_ORDER.includes(key(richCatalog.pick())), 'sem opções usa Math.random e devolve candidato válido');
+});
+
+test('sorteio: tipo e duração (só filme com duração conhecida e <= máximo; série fica de fora)', () => {
+  const at = (random, options) => key(richCatalog.pick({ random: () => random, ...options }));
+  assert.equal(at(0.999999, { type: 'movie' }), 'movie:7');
+  assert.equal(at(0, { type: 'tv' }), 'tv:10');
+  assert.equal(at(0.999999, { type: 'tv' }), 'tv:12');
+  assert.equal(at(0, { maxMinutes: 90 }), 'movie:1');
+  assert.equal(at(0.999999, { maxMinutes: 90 }), 'movie:7', 'só os filmes de até 90 min: o 1 (90) e o 7 (60); o 6 não tem duração');
+  assert.equal(at(0.999999, { maxMinutes: 120 }), 'movie:7');
+  assert.equal(at(0.6, { maxMinutes: 120 }), 'movie:2', 'candidatos até 120 min: 1, 2 e 7');
+  assert.equal(richCatalog.pick({ maxMinutes: 30 }), null);
+  assert.equal(richCatalog.pick({ type: 'tv', maxMinutes: 600 }), null, 'com duração só entra filme: série não tem duração');
+});
+
+test('sorteio: gêneros restringem (série pelo equivalente); sem ninguém no gênero, sorteia sem gênero', () => {
+  const at = (random, options) => key(richCatalog.pick({ random: () => random, ...options }));
+  // Ação (28) casa com os filmes 1 e 6 e, pelo equivalente, com a série 10; Comédia (35) com 2, 7 e a série 12.
+  const actionComedy = [28, 35];
+  assert.equal(at(0, { genreIds: actionComedy }), 'movie:1');
+  assert.equal(at(0.999999, { genreIds: actionComedy }), 'tv:12');
+  const liked = new Set(POOL_ORDER.filter((k) => k !== 'movie:3'));
+  for (let i = 0; i < 6; i++) assert.ok(liked.has(at(i / 6, { genreIds: actionComedy })), 'o filme de Drama nunca sai com Ação e Comédia');
+  assert.equal(at(0.999999, { genreIds: [18, 99] }), 'movie:3', 'só o Drama casa');
+  assert.equal(at(0, { genreIds: [99, 27] }), 'movie:1', 'ninguém casa (terror tem nota baixa, documentário não existe): vale o catálogo todo');
+  assert.equal(at(0, { genreIds: [28, 35], type: 'tv' }), 'tv:10');
+  assert.equal(at(0, { genreIds: [] }), 'movie:1');
+});
+
+test('sorteio: o pool é só dos 200 mais populares do que sobrou', () => {
+  const many = Array.from({ length: 250 }, (_, k) => movie(k + 1, `Filme ${k + 1}`, { v: 1000 - k, n: 500, r: 7 }));
+  const big = createCatalog({ data: { movies: many, series: [] }, now: () => NOW });
+  assert.equal(big.pick({ random: () => 0.999999 }).id, '200', 'o último do pool é o 200º mais popular');
+  assert.equal(big.pick({ random: () => 0 }).id, '1');
+  assert.equal(big.pick({ random: () => 0.999999, exclude: new Set(['movie:1']) }).id, '201', 'excluir um libera o próximo do ranking');
+});
+
+test('hasTitle: título ou original inteiro, sem acento/pontuação/maiúscula; começo de palavra não vale', () => {
+  assert.equal(richCatalog.hasTitle('aventura alta').id, '1');
+  assert.equal(richCatalog.hasTitle('  AVENTURA,  Alta!! ').id, '1');
+  assert.equal(richCatalog.hasTitle('comedia leve').id, '2');
+  assert.equal(richCatalog.hasTitle('Light Comedy').id, '2', 'o título original também conta');
+  assert.equal(richCatalog.hasTitle('Aventura'), null, 'começo do título não é o título');
+  assert.equal(richCatalog.hasTitle('Aventura Alta 2'), null);
+  assert.equal(richCatalog.hasTitle('!!'), null);
+  assert.equal(richCatalog.hasTitle(''), null);
+  assert.deepEqual(richCatalog.hasTitle('Série Boa', { type: 'tv' }), { id: '10', type: 'tv', title: 'Série Boa', year: '2019', poster: '/s10.jpg', backdrop: null, overview: null, rating: 8, runtime: null });
+  assert.equal(richCatalog.hasTitle('Série Boa', { type: 'movie' }), null);
+});
+
+test('hasTitle: tipo e ano filtram; havendo mais de um, o mais popular', () => {
+  const twins = createCatalog({
+    data: {
+      movies: [movie(20, 'Gêmeo', { y: '2001', v: 10 })],
+      series: [{ i: 21, t: 'Gemeo', y: '2015', v: 20, s: [[1, 1]] }],
+    },
+    now: () => NOW,
+  });
+  const found = (options) => twins.hasTitle('gemeo', options) && key(twins.hasTitle('gemeo', options));
+  assert.equal(found(), 'tv:21');
+  assert.equal(found({ type: 'any' }), 'tv:21');
+  assert.equal(found({ type: 'movie' }), 'movie:20');
+  assert.equal(found({ year: 2001 }), 'movie:20', 'o ano escolhe entre os dois');
+  assert.equal(found({ year: '2015', type: 'any' }), 'tv:21');
+  assert.equal(found({ year: 1999 }), null);
+  assert.equal(found({ type: 'tv', year: 2001 }), null);
+});
+
+test('info traz a classificação (0 é livre e não vira null; sem dado = null)', () => {
+  assert.equal(richCatalog.info('movie', '1').certification, 12);
+  assert.equal(richCatalog.info('movie', '2').certification, 0);
+  assert.equal(richCatalog.info('movie', '6').certification, null);
+  assert.equal(richCatalog.detail('tv', '10').certification, 14);
+});
+
+test('modo família: sem limite devolve o próprio catálogo; a visão é memoizada por valor', () => {
+  assert.equal(richCatalog.forRating(null), richCatalog);
+  assert.equal(richCatalog.forRating(undefined), richCatalog);
+  assert.equal(richCatalog.forRating(12), richCatalog.forRating(12));
+  assert.notEqual(richCatalog.forRating(12), richCatalog.forRating(10));
+});
+
+test('modo família: a visão só tem título com classificação conhecida e <= limite, em TODOS os métodos', async () => {
+  const view = richCatalog.forRating(12);
+  // Visíveis: filmes 1 (12), 2 (0), 5 (0), 7 (10) e séries 11 (0) e 12 (10). Fora: 3 (16), 4 (18), 6 e a série 13 (sem classificação), a 10 (14).
+  assert.deepEqual(ids(await view.list('library-movies', 1)), ['1', '2', '7', '5']);
+  assert.deepEqual((await view.list('library-shows', 1)).items.map((i) => i.id), ['11', '12']);
+  assert.deepEqual(ids(await view.list('trending-movies', 1)), ['5', '1', '2', '7']);
+  assert.deepEqual(ids(await view.search('dr')), [], 'Drama Longo (16) não aparece na busca');
+  assert.deepEqual(ids(await view.search('aventura')), ['1']);
+  assert.deepEqual(ids(await view.search('sem')), [], 'sem classificação fica de fora no modo família');
+  assert.equal((await richCatalog.search('sem')).items.length, 1, 'e o catálogo completo continua achando');
+  assert.deepEqual((await view.browse({ type: 'all' })).items.map(key).sort(), ['movie:1', 'movie:2', 'movie:5', 'movie:7', 'tv:11', 'tv:12']);
+  assert.deepEqual((await view.browse({ type: 'tv' })).items.map(key).sort(), ['tv:11', 'tv:12']);
+
+  assert.equal(view.lookup('movie', '1').title, 'Aventura Alta');
+  for (const hidden of [['movie', '3'], ['movie', '4'], ['movie', '6'], ['tv', '10'], ['tv', '13']]) {
+    assert.equal(view.lookup(...hidden), null, hidden.join(':'));
+    assert.equal(view.info(...hidden), null, hidden.join(':'));
+    assert.equal(view.detail(...hidden), null, hidden.join(':'));
+    assert.notEqual(richCatalog.lookup(...hidden), null, 'o catálogo completo continua conhecendo');
+  }
+  assert.ok(view.detail('movie', '1').similar.every((item) => !['3', '4', '6'].includes(item.id)));
+  assert.ok(view.similar('movie', '2').every((item) => view.lookup('movie', item.id)));
+
+  assert.deepEqual(await view.seasons('10'), { seasons: [] });
+  assert.deepEqual(await view.episodes('10', 1), { season: 1, episodes: [] });
+  assert.deepEqual(await view.seasons('12'), { seasons: [1] });
+  assert.equal(view.nextEpisode('10', 1, 1), null);
+  assert.deepEqual(view.nextEpisode('12', 1, 1), { season: 1, episode: 2 });
+  assert.equal(view.episodeCount('10'), null);
+  assert.equal(view.episodeCount('12'), 5);
+  assert.equal(view.hasTitle('Drama Longo'), null);
+  assert.equal(view.hasTitle('Aventura Alta').id, '1');
+
+  const { first, second, both } = view.recommend([28, 35]);
+  for (const item of [...first, ...second, ...both]) assert.notEqual(view.lookup(item.type, item.id), null, `${key(item)} vazou na recomendação`);
+  for (let i = 0; i < 20; i++) {
+    const item = view.pick({ random: () => i / 20 });
+    assert.notEqual(view.lookup(item.type, item.id), null, `${key(item)} vazou no sorteio`);
+  }
+});
+
+test('modo família: diretor com poucos filmes na visão sai da lista, mas a página dele vale', async () => {
+  const full = await richCatalog.directors();
+  assert.deepEqual(full.items.map((d) => [d.id, d.count]), [['900', 3]]);
+  const view = richCatalog.forRating(12);
+  assert.deepEqual((await view.directors()).items, [], 'só 2 filmes visíveis (mínimo da lista: 3)');
+  const page = await view.director('900');
+  assert.deepEqual(ids(page), ['1', '2'], 'o filme de 16 anos não aparece');
+  assert.equal(page.director.count, 2);
+  assert.equal(await richCatalog.forRating(0).director('900').then((r) => r.items.length), 1);
+});
+
+test('modo família: uma visão de visão só restringe mais; a visão preserva `now` e `generatedAt`', async () => {
+  const view = richCatalog.forRating(12);
+  assert.deepEqual(ids(await view.forRating(10).list('library-movies', 1)), ['2', '7', '5']);
+  assert.deepEqual(ids(await view.forRating(16).list('library-movies', 1)), ['1', '2', '7', '5'], 'não afrouxa além da visão de origem');
+  // `now` (lançamentos): o filme 1 estreia em 2026-10-15, depois do `now` injetado (embora já passada no relógio real).
+  assert.ok(!ids(await richCatalog.list('recent-movies', 1)).includes('1'));
+  assert.ok(!ids(await view.list('recent-movies', 1)).includes('1'), 'a visão usa o mesmo relógio do catálogo');
+  // `generatedAt` (novidades): o filme 1 entrou em 2026-09-30, dentro da janela da foto de 2026-10-01 (e fora da janela do `now`).
+  assert.deepEqual(ids(await view.list('new-this-week', 1)), ['1']);
+});
+
+test('modo família: visão vazia (classificação ainda não coletada) responde lista vazia, não 503; catálogo vazio continua 503', async () => {
+  const noRatings = createCatalog({ data: { movies: [movie(1, 'Sem Classificação')], series: [] }, now: () => NOW });
+  assert.deepEqual((await noRatings.forRating(12).list('trending-movies', 1)).items, []);
+  assert.deepEqual((await noRatings.forRating(12).search('sem')).items, []);
+  assert.equal((await noRatings.list('trending-movies', 1)).items.length, 1);
+
+  const empty = createCatalog({ data: { movies: [], series: [] }, now: () => NOW });
+  await assert.rejects(empty.forRating(12).list('trending-movies', 1), { status: 503, code: 'catalog_empty' });
+});

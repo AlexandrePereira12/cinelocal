@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { annotateNew, checkGates, collect, compactMovie, compactSeries, directorsOf, loadAvailableIds, refreshCatalog, serialize } from '../scripts/atualizar-catalogo.mjs';
+import { annotateNew, checkGates, collect, compactMovie, compactSeries, directorsOf, loadAvailableIds, movieCertification, refreshCatalog, serialize, seriesCertification } from '../scripts/atualizar-catalogo.mjs';
 
 const noSleep = async () => {};
 const TODAY = '2026-10-11';
@@ -36,8 +36,8 @@ function fakeWorld({ movies = [101, 102], series = [201], tmdb = {}, declared } 
     const handler = tmdb[`${kind}:${id}`] ?? tmdb.default;
     if (handler) return handler(calls);
     return kind === 'movie'
-      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse', genres: Number(id) % 2 ? GENRES.slice(0, 6) : GENRES.slice(6), credits: { crew: [{ id: 5000 + Number(id), name: `Diretor ${id}`, job: 'Director', profile_path: `/d${id}.jpg` }] } })
-      : json({ id: Number(id), name: `Série ${id}`, first_air_date: '2019-03-04', vote_count: 5, vote_average: 8, popularity: 3, genres: TV_GENRES, seasons: [{ season_number: 1, episode_count: 4, air_date: '2019-03-04' }], last_episode_to_air: { season_number: 1, episode_number: 4 } });
+      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse', genres: Number(id) % 2 ? GENRES.slice(0, 6) : GENRES.slice(6), credits: { crew: [{ id: 5000 + Number(id), name: `Diretor ${id}`, job: 'Director', profile_path: `/d${id}.jpg` }] }, release_dates: { results: [{ iso_3166_1: 'BR', release_dates: [{ certification: '12' }] }] } })
+      : json({ id: Number(id), name: `Série ${id}`, first_air_date: '2019-03-04', vote_count: 5, vote_average: 8, popularity: 3, genres: TV_GENRES, seasons: [{ season_number: 1, episode_count: 4, air_date: '2019-03-04' }], last_episode_to_air: { season_number: 1, episode_number: 4 }, content_ratings: { results: [{ iso_3166_1: 'BR', rating: '14' }] } });
   };
   return { fetchImpl, calls };
 }
@@ -48,8 +48,9 @@ test('compactMovie mapeia os campos do TMDB, omite o que falta e descarta adulto
     poster_path: '/p.jpg', backdrop_path: '/b.jpg', vote_average: 7.26, vote_count: 321, popularity: 55.55, overview: '  Texto   com   espaços  ',
     genres: [{ id: 28, name: 'Ação' }, { id: 18, name: 'Drama' }, { id: 'x', name: 'inválido' }, null],
     credits: { crew: [{ id: 77, name: 'Dir', job: 'Director' }] },
+    release_dates: { results: [{ iso_3166_1: 'BR', release_dates: [{ certification: '12' }] }] },
   });
-  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95, g: [28, 18], dr: [77] });
+  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95, g: [28, 18], dr: [77], c: 12 });
 
   const sparse = compactMovie({ id: 12, title: 'X', original_title: 'X', release_date: '', poster_path: '../x.jpg', vote_count: 0, vote_average: 0, runtime: 0, overview: '' });
   assert.deepEqual(JSON.parse(JSON.stringify(sparse)), { i: 12, t: 'X' }, 'sem título original igual, data, pôster inválido, nota sem votos, duração 0 ou sinopse vazia');
@@ -181,7 +182,7 @@ test('coleta: usa Bearer, língua pt-BR e aborta com mensagem clara se o token f
     /TMDB recusou o token/,
   );
   assert.equal(seen[0].auth, 'Bearer segredo');
-  assert.ok(seen[0].url.endsWith('/3/movie/1?language=pt-BR&append_to_response=credits'), 'filme pede os créditos na mesma chamada');
+  assert.ok(seen[0].url.endsWith('/3/movie/1?language=pt-BR&append_to_response=credits,release_dates'), 'filme pede créditos e classificação na mesma chamada');
 });
 
 test('gates rejeitam snapshot ruim', () => {
@@ -195,6 +196,28 @@ test('gates rejeitam snapshot ruim', () => {
   assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, genreCount: 19 }), []);
   assert.match(checkGates({ stats: ok, kept: 990, previousTotal: 0, movies: 900, directed: 100 })[0], /só 100 de 900 filmes trouxeram diretor/);
   assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, movies: 900, directed: 850 }), []);
+  assert.match(checkGates({ stats: ok, kept: 990, previousTotal: 0, rated: 100 })[0], /só 100 de 990 títulos trouxeram classificação/);
+  assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, rated: 700 }), []);
+});
+
+test('classificação indicativa: vale a do Brasil (a mais alta se houver várias), cai para a dos EUA convertida e some sem nenhuma', () => {
+  const dates = (country, ...certs) => ({ iso_3166_1: country, release_dates: certs.map((certification) => ({ certification })) });
+  assert.equal(movieCertification({ release_dates: { results: [dates('BR', 'L')] } }), 0);
+  assert.equal(movieCertification({ release_dates: { results: [dates('BR', '', '12', '16')] } }), 16, 'estreia e relançamento: a mais alta');
+  assert.equal(movieCertification({ release_dates: { results: [dates('US', 'PG-13'), dates('BR', '10')] } }), 10, 'Brasil vence os EUA');
+  assert.equal(movieCertification({ release_dates: { results: [dates('US', 'PG-13')] } }), 14, 'sem Brasil: PG-13 vira 14 (faixa mais restrita)');
+  assert.equal(movieCertification({ release_dates: { results: [dates('US', 'R')] } }), 16);
+  assert.equal(movieCertification({ release_dates: { results: [dates('BR', 'abc'), dates('FR', '12')] } }), undefined, 'lixo e outros países são ignorados');
+  assert.equal(movieCertification({}), undefined);
+  assert.equal(movieCertification({ release_dates: { results: 'x' } }), undefined);
+
+  const rating = (country, value) => ({ iso_3166_1: country, rating: value });
+  assert.equal(seriesCertification({ content_ratings: { results: [rating('BR', '14')] } }), 14);
+  assert.equal(seriesCertification({ content_ratings: { results: [rating('US', 'TV-Y7')] } }), 0);
+  assert.equal(seriesCertification({ content_ratings: { results: [rating('US', 'TV-MA')] } }), 18);
+  assert.equal(seriesCertification({ content_ratings: { results: [rating('US', 'NR')] } }), undefined);
+  assert.equal(compactSeries({ id: 1, name: 'S', content_ratings: { results: [rating('BR', '12')] } }, TODAY).c, 12);
+  assert.equal(JSON.stringify(compactMovie({ id: 2, title: 'Sem classificação' })).includes('"c"'), false, 'sem classificação, `c` não vai para o arquivo');
 });
 
 test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com um ruim', async () => {
@@ -218,6 +241,9 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   assert.equal(Object.keys(mod.default.directors).length, 10);
   assert.deepEqual(mod.default.directors[5001], { n: 'Diretor 1', p: '/d1.jpg' });
   assert.deepEqual(mod.default.movies[0].dr, [5001]);
+  assert.equal(mod.default.movies[0].c, 12);
+  assert.equal(mod.default.series[0].c, 14);
+  assert.equal(summary.classificados, 12);
   assert.deepEqual(mod.default.movies[0].g, GENRES.slice(0, 6).map((g) => g.id), 'filme 1 (ímpar) traz os ids do 1º grupo');
   assert.ok(written.split('\n').filter((line) => line.startsWith('    {')).length === 12, 'um item por linha');
   assert.ok(!written.includes('TMDB_TOKEN') && !written.includes('Bearer'), 'nenhum segredo no arquivo');
@@ -248,6 +274,17 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   };
   await assert.rejects(refreshCatalog({ ...common, fetchImpl: noGenres }), /só 0 gêneros/);
   assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto também sem gêneros');
+
+  // TMDB sem classificação (mudança de formato): gate barra, senão o modo família esconderia o catálogo inteiro
+  const noRatings = async (url, init) => {
+    const res = await good.fetchImpl(url, init);
+    const body = await res.json();
+    delete body.release_dates;
+    delete body.content_ratings;
+    return json(body);
+  };
+  await assert.rejects(refreshCatalog({ ...common, fetchImpl: noRatings }), /títulos trouxeram classificação/);
+  assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto também sem classificação');
 
   // all-ids encolheu muito frente ao anterior: gate de queda barra
   const shrunk = fakeWorld({ movies: [1, 2], series: [20] });

@@ -31,5 +31,5 @@ function wrap(store) {
 
 export function blobsStores() {
   const open = (name) => wrap(getStore({ name, consistency: 'strong' }));
-  return { users: open('users'), library: open('library'), limits: open('limits'), tv: open('tv') };
+  return { users: open('users'), library: open('library'), limits: open('limits'), tv: open('tv'), requests: open('requests') };
 }

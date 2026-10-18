@@ -35,7 +35,7 @@ const catalog = createCatalog({ data, now: () => NOW });
 const ids = (result) => result.items.map((item) => `${item.type}:${item.id}`);
 
 test('info e detail: gêneros por nome, contagem de temporadas/episódios e título fora do catálogo = null', () => {
-  assert.deepEqual(catalog.info('movie', '2'), { overview: 'Sinopse 2', rating: 8.5, votes: 600, runtime: 85, originalTitle: null, genres: ['Drama'], seasons: null, episodes: null });
+  assert.deepEqual(catalog.info('movie', '2'), { overview: 'Sinopse 2', rating: 8.5, votes: 600, runtime: 85, originalTitle: null, genres: ['Drama'], certification: null, seasons: null, episodes: null });
   assert.deepEqual(catalog.info('tv', '10').genres, ['Drama', 'Action & Adventure'], 'série usa os nomes de gênero de série');
   assert.equal(catalog.info('tv', '10').seasons, 3);
   assert.equal(catalog.info('tv', '10').episodes, 30);

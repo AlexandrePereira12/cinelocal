@@ -7,6 +7,8 @@
  * - Os links do e-mail de aprovação abrem uma página de confirmação (a decisão é um POST); GET que muda estado
  *   seria disparado por scanners de e-mail.
  * - Nome e e-mail do solicitante são texto livre: escapados no HTML e sem quebra de linha no assunto.
+ * - O pedido de título (texto livre de qualquer usuário aprovado) segue a mesma regra: nome, e-mail, título e observação
+ *   escapados no HTML e assunto sem quebra de linha. É aviso de melhor esforço: quem chama não desfaz o pedido se falhar.
  * - Modo "dry run" imprime os links no console, mas só com MAIL_DRY_RUN=1 *e* NETLIFY_DEV=true (netlify dev);
  *   em produção o link é credencial e nunca vai para log. Vale também para o link de redefinição de senha.
  * - Os e-mails para a pessoa (aviso de decisão e redefinição) só chegam se o remetente puder escrever para qualquer
@@ -27,6 +29,8 @@ const LINE_BREAKS = new RegExp('[\\r\\n\\u2028\\u2029]+', 'g');
 function oneLine(text) {
   return String(text).replace(LINE_BREAKS, ' ').slice(0, 80);
 }
+
+const REQUEST_KIND = { any: 'filme ou série', movie: 'filme', tv: 'série' };
 
 export function createMailer(env, fetchImpl = fetch) {
   const dryRun = env.MAIL_DRY_RUN === '1' && env.NETLIFY_DEV === 'true';
@@ -57,6 +61,24 @@ export function createMailer(env, fetchImpl = fetch) {
         <p>Os links abrem uma página de confirmação e valem por 7 dias.</p>`;
       const text = `Nova solicitação de cadastro: ${name} <${email}>\nAprovar: ${approveUrl}\nRecusar: ${rejectUrl}\nOs links valem por 7 dias.`;
       await deliver({ to: env.ADMIN_EMAIL, subject: `Cadastro pendente: ${oneLine(name)}`, html, text });
+    },
+
+    // Pedido de um título que o catálogo não tem (ver "Decisões dos pedidos" em handler.mjs). Vai para o admin.
+    async sendTitleRequest({ name, email, title, type, year, note }) {
+      const kind = REQUEST_KIND[type] ?? REQUEST_KIND.any;
+      const details = [`${kind}`, year ? `ano ${year}` : null].filter(Boolean).join(', ');
+      if (dryRun) {
+        console.log(`[dry-run] pedido de título de ${name} <${email}>: ${title} (${details})${note ? ` - ${note}` : ''}`);
+        return;
+      }
+
+      const html = `
+        <p>Novo pedido de título no Cine Local:</p>
+        <p><strong>${escapeHtml(title)}</strong> (${escapeHtml(details)})</p>
+        ${note ? `<p>Observação: ${escapeHtml(note)}</p>` : ''}
+        <p>Pedido por ${escapeHtml(name)} (${escapeHtml(email)}).</p>`;
+      const text = `Novo pedido de título: ${title} (${details})\n${note ? `Observação: ${note}\n` : ''}Pedido por ${name} <${email}>`;
+      await deliver({ to: env.ADMIN_EMAIL, subject: `Pedido de título: ${oneLine(title)}`, html, text });
     },
 
     // Resultado da decisão do admin, para quem pediu o cadastro.

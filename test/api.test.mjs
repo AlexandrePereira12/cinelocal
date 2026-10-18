@@ -190,7 +190,7 @@ test('login: erro genérico, pendente só após senha correta, aprovação liber
   const ok = await app.call('POST', '/api/auth/login', { body: { email: body.email, password: body.password } });
   assert.equal(ok.status, 200);
   assert.deepEqual(Object.keys(ok.body).sort(), ['token', 'user']);
-  assert.deepEqual(ok.body.user, { name: 'Ana', genres: null, needsGenres: true });
+  assert.deepEqual(ok.body.user, { name: 'Ana', genres: null, needsGenres: true, maxRating: null });
 });
 
 test('decisão: prévia sem mudar estado, uso único, recusa bloqueia', async () => {
@@ -419,7 +419,7 @@ test('gêneros favoritos: usuário novo precisa escolher 2, salva, e o perfil re
   const { token } = await app.registerAndApprove();
 
   const before = await app.call('GET', '/api/auth/me', { token });
-  assert.deepEqual(before.body, { name: 'Ana Souza', genres: null, needsGenres: true });
+  assert.deepEqual(before.body, { name: 'Ana Souza', genres: null, needsGenres: true, maxRating: null });
 
   const prefs = await app.call('GET', '/api/me/preferences', { token });
   assert.deepEqual(prefs.body.options, [{ id: 28, name: 'Ação' }, { id: 35, name: 'Comédia' }, { id: 18, name: 'Drama' }]);
@@ -431,7 +431,7 @@ test('gêneros favoritos: usuário novo precisa escolher 2, salva, e o perfil re
   assert.equal(saved.body.needsGenres, false);
 
   const after = await app.call('GET', '/api/auth/me', { token });
-  assert.deepEqual(after.body, { name: 'Ana Souza', genres: [{ id: 18, name: 'Drama' }, { id: 28, name: 'Ação' }], needsGenres: false });
+  assert.deepEqual(after.body, { name: 'Ana Souza', genres: [{ id: 18, name: 'Drama' }, { id: 28, name: 'Ação' }], needsGenres: false, maxRating: null });
   const login = await app.call('POST', '/api/auth/login', { body: { email: 'ana@exemplo.com', password: 'Senha_bem_longa_1' } });
   assert.equal(login.body.user.needsGenres, false, 'o login também já traz os gêneros');
 
@@ -466,13 +466,13 @@ test('gêneros favoritos: id salvo que saiu do catálogo volta a pedir a escolha
   await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
   for (const [key, entry] of app.stores.users.data) app.stores.users.data.set(key, { ...entry, value: { ...entry.value, genres: [28, 777] } });
   const me = await app.call('GET', '/api/auth/me', { token });
-  assert.deepEqual(me.body, { name: 'Ana Souza', genres: null, needsGenres: true });
+  assert.deepEqual(me.body, { name: 'Ana Souza', genres: null, needsGenres: true, maxRating: null });
 });
 
 test('gêneros favoritos: catálogo sem gêneros não obriga ninguém e recusa salvar', async () => {
   const app = makeApp({ genres: false });
   const { token } = await app.registerAndApprove();
-  assert.deepEqual((await app.call('GET', '/api/auth/me', { token })).body, { name: 'Ana Souza', genres: null, needsGenres: false });
+  assert.deepEqual((await app.call('GET', '/api/auth/me', { token })).body, { name: 'Ana Souza', genres: null, needsGenres: false, maxRating: null });
   assert.equal((await app.call('GET', '/api/me/preferences', { token })).body.options.length, 0);
   const res = await app.call('POST', '/api/me/preferences', { token, body: { genres: [28, 18] } });
   assert.equal(res.status, 409);

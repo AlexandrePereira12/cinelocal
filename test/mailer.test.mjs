@@ -113,3 +113,51 @@ test('dry run só vale no netlify dev e nunca em produção', async () => {
     console.log = original;
   }
 });
+
+const request = { name: 'Ana <b>Souza</b>\nBcc: x@y.z', email: 'ana"@exemplo.com', title: 'Duna <script>alert(1)</script>\r\nBcc: x@y.z', type: 'movie', year: 2027, note: 'versão <i>legendada</i> & "dublada"' };
+
+test('pedido de título vai ao admin com tudo escapado no HTML e assunto em uma linha', async () => {
+  const { sent, fetchImpl } = capture();
+  await createMailer(env, fetchImpl).sendTitleRequest(request);
+
+  const [{ url, body }] = sent;
+  assert.equal(url, 'https://api.resend.com/emails');
+  assert.deepEqual(body.to, ['admin@exemplo.invalid']);
+  assert.ok(!/[\r\n]/.test(body.subject), 'assunto sem quebra de linha');
+  assert.ok(body.subject.startsWith('Pedido de título: Duna'));
+  for (const raw of ['<script>', '<b>', '<i>']) assert.ok(!body.html.includes(raw), `${raw} escapado`);
+  for (const escaped of ['&lt;script&gt;', '&lt;b&gt;Souza', '&lt;i&gt;legendada', '&amp; &quot;dublada&quot;', 'ana&quot;@exemplo.com']) assert.ok(body.html.includes(escaped), escaped);
+  assert.ok(body.html.includes('filme') && body.html.includes('2027'));
+  assert.ok(body.text.includes('Pedido por'));
+});
+
+test('pedido de título: sem ano e sem observação, tipo qualquer e falhas viram erro', async () => {
+  const { sent, fetchImpl } = capture();
+  const mailer = createMailer(env, fetchImpl);
+  await mailer.sendTitleRequest({ name: 'Ana', email: 'ana@exemplo.com', title: 'Duna', type: 'any', year: null, note: null });
+  const [{ body }] = sent;
+  assert.ok(body.html.includes('filme ou série'));
+  assert.ok(!body.html.includes('Observação') && !body.html.includes('ano'), 'campos ausentes não aparecem');
+
+  await assert.rejects(createMailer(env, capture(500).fetchImpl).sendTitleRequest(request), /mail_failed:500/);
+  await assert.rejects(createMailer({ ...env, ADMIN_EMAIL: '' }, capture().fetchImpl).sendTitleRequest(request), /mail_not_configured/);
+  await assert.rejects(createMailer({}, capture().fetchImpl).sendTitleRequest(request), /mail_not_configured/);
+});
+
+test('pedido de título: dry run só no netlify dev, sem enviar', async () => {
+  const logs = [];
+  const original = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  try {
+    const dev = capture();
+    await createMailer({ MAIL_DRY_RUN: '1', NETLIFY_DEV: 'true' }, dev.fetchImpl).sendTitleRequest(request);
+    assert.equal(dev.sent.length, 0);
+    assert.ok(logs.join('\n').includes('pedido de título'));
+
+    const prod = capture();
+    await createMailer({ ...env, MAIL_DRY_RUN: '1' }, prod.fetchImpl).sendTitleRequest(request);
+    assert.equal(prod.sent.length, 1, 'MAIL_DRY_RUN sozinho não desliga o envio real');
+  } finally {
+    console.log = original;
+  }
+});

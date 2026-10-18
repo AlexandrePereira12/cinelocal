@@ -5,6 +5,9 @@ const HERO_SIZE = 5;
 const META_LIMIT = 400;
 const SEARCH_CAP = 40; // igual a SEARCH_LIMIT do servidor (catalog.mjs): a busca para aqui, então avisamos
 const TOKEN_KEY = 'cine.token';
+const REQUEST_TITLE_MAX = 100; // iguais aos limites de validate.mjs (cleanRequestTitle / cleanNote)
+const REQUEST_NOTE_MAX = 200;
+const SURPRISE_SKIP_MAX = 40; // teto de `skip` que o servidor aceita
 
 const LIST_TITLES = {
   'new-this-week': 'Novidades da semana',
@@ -91,7 +94,8 @@ function writeStore(key, value) {
 
 // --- sessão e API ---
 
-const session = { token: null, name: null, genres: null, needsGenres: false };
+// `maxRating`: limite do modo família (classificação indicativa máxima: 0, 10, 12, 14 ou 16); null = modo desligado.
+const session = { token: null, name: null, genres: null, needsGenres: false, maxRating: null };
 
 try {
   session.token = localStorage.getItem(TOKEN_KEY);
@@ -104,6 +108,7 @@ function clearSession(message) {
   session.name = null;
   session.genres = null;
   session.needsGenres = false;
+  session.maxRating = null;
   flash = message ?? null;
   try {
     localStorage.removeItem(TOKEN_KEY);
@@ -132,16 +137,19 @@ async function api(path, { method = 'GET', body } = {}) {
       clearSession('Sua sessão expirou. Entre de novo.');
       location.hash = '#/login';
     }
-    throw Object.assign(new Error(data.error || `Erro ${res.status}`), { status: res.status, code: data.code });
+    // `data` vai junto porque alguns erros trazem conteúdo útil (o 409 do pedido de título devolve o título que já existe).
+    throw Object.assign(new Error(data.error || `Erro ${res.status}`), { status: res.status, code: data.code, data });
   }
   return data;
 }
 
-// Perfil devolvido pelo servidor no login e em /auth/me: nome, gêneros favoritos e se ainda falta escolhê-los.
+// Perfil devolvido pelo servidor no login e em /auth/me: nome, gêneros favoritos, se ainda falta escolhê-los e o limite do modo família.
+// Algumas telas só repassam parte do perfil (nome e gêneros); sem a chave `maxRating` o limite guardado não pode ser zerado.
 function applyProfile(profile) {
   session.name = profile.name;
   session.genres = profile.genres ?? null;
   session.needsGenres = Boolean(profile.needsGenres);
+  if ('maxRating' in profile) session.maxRating = profile.maxRating ?? null;
 }
 
 function updateChrome() {
@@ -161,6 +169,8 @@ function remember(items) {
 }
 
 function watchHref(item) {
+  // Série com episódio novo abre direto nele (o servidor devolve a posição já avançada); sem isso o player retomaria o último antigo.
+  if (item.type === 'tv' && item.fresh && item.season != null) return `#/assistir/tv/${item.id}/${item.season}/${item.episode}`;
   return `#/assistir/${item.type}/${item.id}`;
 }
 
@@ -214,6 +224,8 @@ function card(item) {
       ? el('img', { src, alt: '', loading: 'lazy', decoding: 'async' })
       : el('div', { class: 'card-fallback' }, item.title),
     item.type === 'tv' && el('span', { class: 'badge left type' }, progressLabel ?? 'Série'),
+    // O servidor marca `fresh` quando o catálogo ganhou episódios depois da última vez que a pessoa mexeu na série.
+    item.type === 'tv' && item.fresh && el('span', { class: 'badge left fresh' }, 'Novo episódio'),
     item.rating != null && el('span', { class: 'badge right' }, `★ ${item.rating.toFixed(1)}`),
   );
   return el(
@@ -232,6 +244,37 @@ function row(title, items, href, build = card) {
     el('div', { class: 'row-head' }, el('h2', {}, title), href && el('a', { href }, 'Ver tudo')),
     el('div', { class: 'row-scroll' }, items.map(build)),
   );
+}
+
+// Selo da classificação indicativa do Brasil (0 = livre). Sem classificação conhecida (null) não mostra nada.
+function ratingBadge(certification) {
+  if (certification == null) return null;
+  const text = certification === 0 ? 'Livre para todos os públicos' : `${certification} anos`;
+  return el('span', { class: `age age-${certification}`, role: 'img', 'aria-label': `Classificação indicativa: ${text}`, title: `Classificação indicativa: ${text}` }, certification === 0 ? 'L' : String(certification));
+}
+
+// Botão "Quero ver" (liga/desliga) usado no detalhe e no sorteio. Erros vão para `message`.
+function watchlistButton(type, id, initial, message) {
+  let inList = Boolean(initial);
+  const button = el('button', { class: 'btn', type: 'button', onclick: () => toggle() });
+  function paint() {
+    button.replaceChildren(icon('bookmark'), inList ? 'Na lista “Quero ver”' : 'Quero ver');
+    button.setAttribute('aria-pressed', String(inList));
+  }
+  async function toggle() {
+    message.textContent = '';
+    button.disabled = true;
+    try {
+      inList = (await api('me/watchlist', { method: 'POST', body: { type, id, add: !inList } })).inWatchlist;
+      paint();
+    } catch (err) {
+      message.textContent = err.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+  paint();
+  return button;
 }
 
 const directorHref = (director) => `#/diretor/${director.id}`;
@@ -368,6 +411,7 @@ const ICONS = {
   bookmark: ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'],
   tv: ['M4 7h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z', 'M17 2l-5 5-5-5'],
   x: ['M18 6L6 18', 'M6 6l12 12'],
+  shuffle: ['M16 3h5v5', 'M4 20L21 3', 'M21 16v5h-5', 'M15 15l6 6', 'M4 4l5 5'],
   shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
 };
 
@@ -394,7 +438,7 @@ function field(label, id, attrs, { iconName, trailing } = {}) {
     el(
       'div',
       { class: 'input-wrap' },
-      el('span', { class: 'input-icon' }, icon(iconName)),
+      iconName && el('span', { class: 'input-icon' }, icon(iconName)),
       el('input', { id, name: id, required: true, 'aria-describedby': `${id}-msg`, ...attrs }),
       trailing,
     ),
@@ -1099,6 +1143,8 @@ async function renderHome(token) {
   const trending = listResult('trending-movies');
   const featured = trending.status === 'fulfilled' ? trending.value.items.filter((i) => i.poster && i.backdrop).slice(0, HERO_SIZE) : [];
   if (featured.length) page.append(hero(featured));
+  // Atalho para quem abriu o app sem saber o que ver: leva ao sorteio, que também tem filtros de duração e tipo.
+  page.append(el('div', { class: 'home-tools' }, el('a', { class: 'btn', href: '#/sorteio' }, icon('shuffle'), 'Não sei o que ver')));
 
   const library = libraryResult.status === 'fulfilled' ? libraryResult.value : { continue: [], watched: [], watchlist: [] };
   remember([...library.continue, ...library.watched, ...(library.watchlist ?? [])]);
@@ -1147,10 +1193,10 @@ async function renderHome(token) {
 // `header` entra entre o título e a grade (filtros); `onData` recebe cada resposta (ex.: total de resultados).
 // `build` monta cada item (padrão: card de título) e `gridClass` troca a grade; com `build` próprio os itens não são títulos,
 // então não entram na memória de títulos vistos. `title` null = sem <h1> (a tela já trouxe o dela no `header`).
-function renderPagedGrid(title, loadPage, token, { header = null, onData = null, build = null, gridClass = 'grid', skeleton = skeletonCard } = {}) {
+function renderPagedGrid(title, loadPage, token, { header = null, onData = null, build = null, gridClass = 'grid', skeleton = skeletonCard, footer = null } = {}) {
   const grid = el('div', { class: gridClass, 'aria-busy': 'true' }, Array.from({ length: 18 }, skeleton));
   const more = el('div', { class: 'more' });
-  const page = el('div', { class: 'page' }, title && el('h1', {}, title), header, grid, more);
+  const page = el('div', { class: 'page' }, title && el('h1', {}, title), header, grid, more, footer);
   app.replaceChildren(page);
 
   let next = 1;
@@ -1235,12 +1281,17 @@ function renderSearch(term, params, token) {
     location.hash = hashWithQuery(`#/busca/${encodeURIComponent(term)}`, { tipo: next.type === 'all' ? '' : next.type, ano: next.range });
   };
   const note = el('p', { class: 'filters-note', 'aria-live': 'polite' });
+  // Só aparece quando a busca volta vazia: o pedido leva o termo já preenchido (limitado ao tamanho que o servidor aceita).
+  const requestHint = el('p', { class: 'request-hint', 'aria-live': 'polite', hidden: true }, 'Não achou? ', el('a', { href: hashWithQuery('#/pedidos', { titulo: term.slice(0, REQUEST_TITLE_MAX) }) }, 'Peça este título'));
+  // Com resultados, o convite fica no fim da lista (quem rolou até lá e não achou o que queria); o de cima cobre a busca vazia.
+  const requestFoot = el('p', { class: 'request-foot', 'aria-live': 'polite', hidden: true }, 'Não encontrou o que procurava? ', el('a', { href: hashWithQuery('#/pedidos', { titulo: term.slice(0, REQUEST_TITLE_MAX) }) }, 'Peça este título'));
   const header = el(
     'div',
     { class: 'filters' },
     filterSelect('Tipo', 'filter-type', TYPE_OPTIONS, type, (value) => go({ type: value, range })),
     filterSelect('Ano', 'filter-year', YEAR_RANGES, range, (value) => go({ type, range: value })),
     note,
+    requestHint,
   );
   renderPagedGrid(
     `Resultados para “${term}”`,
@@ -1251,7 +1302,15 @@ function renderSearch(term, params, token) {
       return { ...(await api(`search?${query}`)), totalPages: 1 };
     },
     token,
-    { header, onData: (data) => (note.textContent = data.items.length >= SEARCH_CAP ? `Mostrando os ${SEARCH_CAP} primeiros. Use os filtros para refinar.` : '') },
+    {
+      header,
+      onData: (data) => {
+        note.textContent = data.items.length >= SEARCH_CAP ? `Mostrando os ${SEARCH_CAP} primeiros. Use os filtros para refinar.` : '';
+        requestHint.hidden = data.items.length > 0;
+        requestFoot.hidden = data.items.length === 0;
+      },
+      footer: requestFoot,
+    },
   );
 }
 
@@ -1411,25 +1470,7 @@ async function renderTitle(type, id, token) {
   const playLabel = !progress ? '▶ Assistir' : progress.done ? '▶ Assistir de novo' : type === 'tv' ? `▶ Continuar T${progress.season} · E${progress.episode}` : '▶ Continuar';
   const message = el('p', { class: 'form-error', role: 'alert' });
 
-  let inList = data.inWatchlist;
-  const listButton = el('button', { class: 'btn', type: 'button', onclick: () => toggleList() });
-  function paintList() {
-    listButton.replaceChildren(icon('bookmark'), inList ? 'Na lista “Quero ver”' : 'Quero ver');
-    listButton.setAttribute('aria-pressed', String(inList));
-  }
-  async function toggleList() {
-    message.textContent = '';
-    listButton.disabled = true;
-    try {
-      inList = (await api('me/watchlist', { method: 'POST', body: { type, id, add: !inList } })).inWatchlist;
-      paintList();
-    } catch (err) {
-      message.textContent = err.message;
-    } finally {
-      listButton.disabled = false;
-    }
-  }
-  paintList();
+  const listButton = watchlistButton(type, id, data.inWatchlist, message);
 
   const posterSrc = posterUrl(data.poster, 'w500');
   app.replaceChildren(
@@ -1450,13 +1491,13 @@ async function renderTitle(type, id, token) {
             { class: 'detail-text' },
             el('h1', {}, data.title),
             data.originalTitle && el('p', { class: 'sub' }, data.originalTitle),
-            meta && el('p', { class: 'detail-meta' }, meta),
+            (meta || data.certification != null) && el('p', { class: 'detail-meta' }, ratingBadge(data.certification), meta),
             data.genres.length > 0 && el('ul', { class: 'tags' }, data.genres.map((name) => el('li', {}, name))),
             data.directors?.length > 0 &&
               el('p', { class: 'detail-directors' }, 'Direção: ', data.directors.flatMap((director, i) => [i > 0 && ', ', el('a', { href: directorHref(director) }, director.name)])),
             data.overview ? el('p', { class: 'detail-overview' }, data.overview) : el('p', { class: 'detail-overview empty' }, 'Sem sinopse no catálogo.'),
             progress?.done && el('p', { class: 'detail-seen' }, '✓ Você já assistiu'),
-            el('div', { class: 'detail-actions' }, el('a', { class: 'btn primary', href: watchHref({ type, id }) }, playLabel), listButton),
+            el('div', { class: 'detail-actions' }, el('a', { class: 'btn primary', href: watchHref({ type, id, season: progress?.season, episode: progress?.episode, fresh: progress?.fresh }) }, playLabel), listButton),
             message,
           ),
         ),
@@ -1511,16 +1552,108 @@ function confirmDialog(title, text, actionLabel, cancelLabel = 'Cancelar') {
   });
 }
 
+// Modo família: o aparelho pode ser usado por criança, então o limite só pode ser AFROUXADO (desligar ou subir o limite)
+// com a senha da conta; apertar (ligar ou baixar o limite) é livre. A senha só viaja quando é exigida. Títulos sem
+// classificação conhecida ficam de fora com o modo ligado (decisão conservadora do servidor).
+const RATING_LIMITS = [0, 10, 12, 14, 16];
+
+function familySection(prefs) {
+  const limits = Array.isArray(prefs?.ratingOptions) && prefs.ratingOptions.length ? prefs.ratingOptions : RATING_LIMITS;
+  let current = prefs && 'maxRating' in prefs ? (prefs.maxRating ?? null) : session.maxRating;
+  const optionLabel = (value) => (value === null ? 'Desligado' : value === 0 ? 'Livre (todos os públicos)' : `Até ${value} anos`);
+  const choices = [null, ...limits];
+
+  const select = el(
+    'select',
+    { id: 'rating-limit', onchange: () => sync() },
+    choices.map((value) => el('option', { value: value === null ? '' : String(value), selected: value === current }, optionLabel(value))),
+  );
+  const passRoot = passwordField('Senha da conta', 'rating-password', { autocomplete: 'current-password' }, { reveal: false });
+  const passInput = passRoot.querySelector('input');
+  const state = el('p', { class: 'auth-hint', role: 'status' });
+  const info = el('p', { class: 'form-info', role: 'status' });
+  const error = el('p', { class: 'form-error', role: 'alert' });
+  const save = el('button', { class: 'btn primary', type: 'submit' }, 'Salvar');
+
+  const chosen = () => (select.value === '' ? null : Number(select.value));
+  const loosens = () => current !== null && (chosen() === null || chosen() > current);
+
+  // A senha só aparece quando a escolha afrouxa o limite que está valendo.
+  function sync() {
+    passRoot.hidden = !loosens();
+    if (passRoot.hidden) {
+      passInput.value = '';
+      setFieldState(passRoot, null);
+    }
+    save.disabled = chosen() === current;
+    state.textContent = current === null ? 'Modo família desligado: todo o catálogo aparece.' : `Modo família ligado: só aparecem títulos ${current === 0 ? 'livres para todos os públicos' : `até ${current} anos`}.`;
+  }
+
+  const form = el(
+    'form',
+    {
+      class: 'panel',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        info.textContent = '';
+        error.textContent = '';
+        const max = chosen();
+        const needsPassword = loosens();
+        if (needsPassword && !passInput.value) {
+          setFieldState(passRoot, 'invalid', 'Informe a senha da conta para afrouxar o limite.');
+          passInput.focus();
+          return;
+        }
+        setBusy(save, true, 'Salvando…');
+        try {
+          const body = needsPassword ? { max, password: passInput.value } : { max };
+          const data = await api('me/rating-limit', { method: 'POST', body });
+          applyProfile(data);
+          current = data.maxRating ?? null;
+          browseOptions = null; // a lista de gêneros do Explorar vem do catálogo visível e pode mudar com o limite
+          passInput.value = '';
+          sync();
+          info.textContent = current === null ? 'Modo família desligado.' : 'Modo família atualizado.';
+        } catch (err) {
+          if (err.code === 'wrong_password') {
+            setFieldState(passRoot, 'invalid', err.message);
+            passInput.focus();
+          } else {
+            error.textContent = err.message;
+          }
+        } finally {
+          setBusy(save, false, 'Salvar');
+          save.disabled = chosen() === current;
+        }
+      },
+    },
+    el('h2', {}, 'Modo família'),
+    el('p', { class: 'auth-hint' }, 'Para quando crianças usam o aparelho: só aparecem títulos com classificação indicativa até o limite escolhido. Para afrouxar o limite ou desligar o modo é preciso a senha da conta.'),
+    el('div', { class: 'field' }, el('label', { for: 'rating-limit' }, 'Limite de classificação'), select),
+    passRoot,
+    state,
+    info,
+    error,
+    el('div', { class: 'genres-actions' }, save),
+  );
+  passInput.addEventListener('input', () => setFieldState(passRoot, null));
+  sync();
+  return form;
+}
+
 async function renderAccount(token) {
   app.replaceChildren(spinner());
   let account;
+  let prefs = null; // traz o limite do modo família e as opções; sem ele a tela usa o que já está na sessão
   try {
-    account = await api('me/account');
+    [account, prefs] = await Promise.all([api('me/account'), api('me/preferences').catch(() => null)]);
   } catch (err) {
     if (token === navToken) app.replaceChildren(errorState(err.message, () => route()));
     return;
   }
   if (token !== navToken) return;
+  if (prefs) applyProfile(prefs);
 
   // 1. nome
   const nameRoot = field('Nome', 'name', { type: 'text', autocomplete: 'name', maxlength: '60', value: account.name }, { iconName: 'user' });
@@ -1665,7 +1798,19 @@ async function renderAccount(token) {
     ),
   );
 
-  app.replaceChildren(el('div', { class: 'page account-page' }, el('h1', {}, 'Meu perfil'), nameForm, genresPanel, passForm, logoutAll));
+  // 5. modo família: limite de classificação indicativa
+  const familyPanel = familySection(prefs);
+
+  // 6. pedidos de título
+  const requestsPanel = el(
+    'section',
+    { class: 'panel' },
+    el('h2', {}, 'Pedidos de títulos'),
+    el('p', { class: 'auth-hint' }, 'Não encontrou um filme ou série? Peça e acompanhe aqui.'),
+    el('div', { class: 'genres-actions' }, el('a', { class: 'btn', href: '#/pedidos' }, 'Pedir ou ver meus pedidos')),
+  );
+
+  app.replaceChildren(el('div', { class: 'page account-page' }, el('h1', {}, 'Meu perfil'), nameForm, genresPanel, familyPanel, requestsPanel, passForm, logoutAll));
 }
 
 // --- transmitir para a TV ---
@@ -1987,6 +2132,9 @@ let sandboxMode = loadSandboxMode();
 // (`cineWatch` na tela, `cineGuard` na guarda) para reconhecer só o voltar que desempilhou a guarda desta tela.
 // O Chrome pula entradas criadas sem interação prévia com a página: nesse caso o voltar sai como sempre saiu.
 
+// Atalho de teclado "N" (próximo episódio): a tela da série registra aqui a ação enquanto está aberta; route() solta.
+let watchHotkey = null;
+
 let watchGuard = null; // { id, hash } enquanto a tela do filme está aberta
 let leavePrompt = false;
 
@@ -2035,6 +2183,18 @@ function onWatchBeforeUnload(event) {
 
 window.addEventListener('beforeunload', onWatchBeforeUnload);
 
+// "N" avança de episódio. Não vale com a pessoa digitando (campo, seletor, área de texto), com janela aberta, com
+// Ctrl/Alt/Cmd (atalhos do navegador) nem em tecla repetida (segurar o N marcaria vários episódios de uma vez).
+// Com o foco dentro do iframe do player o evento nem chega aqui: o atalho vale com o foco na página.
+document.addEventListener('keydown', (event) => {
+  if (!watchHotkey || event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key !== 'n' && event.key !== 'N') return;
+  if (event.target instanceof Element && event.target.closest('input, select, textarea, [contenteditable=""], [contenteditable="true"]')) return;
+  if (document.querySelector('dialog[open]')) return;
+  event.preventDefault();
+  watchHotkey();
+});
+
 async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const isTv = type === 'tv';
   const known = meta[`${type}:${id}`];
@@ -2061,6 +2221,16 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   const castBtn = el('button', { class: 'btn', type: 'button', onclick: () => openCastDialog(cast) }, icon('tv'), 'Transmitir para a TV');
   const reloadBtn = el('button', { class: 'btn', type: 'button', onclick: () => loadFrame() }, 'Recarregar player');
   const doneBtn = el('button', { class: 'btn', type: 'button', onclick: () => toggleDone() }, 'Marcar como assistido');
+  // Cartão "Terminou?" logo abaixo do player de série. O player é um iframe de outra origem e não avisa quando o episódio
+  // acaba, então NÃO há avanço automático por tempo (seria chute): quem avisa é a pessoa, por este botão ou pela tecla N.
+  const nextLabel = el('p', { class: 'next-label' });
+  const nextAction = el('button', { class: 'btn primary', type: 'button', onclick: () => finishEpisode() });
+  const nextCard = el(
+    'section',
+    { class: 'next-card', 'aria-label': 'Próximo episódio', hidden: true },
+    el('div', { class: 'next-text' }, el('p', { class: 'next-title' }, 'Terminou?'), nextLabel),
+    nextAction,
+  );
   const page = el(
     'div',
     { class: 'watch' },
@@ -2080,6 +2250,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
 
   if (isTv) {
     page.append(
+      nextCard,
       el(
         'div',
         { class: 'controls series' },
@@ -2146,7 +2317,7 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
       ...(extra.genres ?? []),
     ].filter(Boolean);
     info.replaceChildren(
-      facts.length > 0 && el('p', { class: 'watch-meta' }, facts.join(' · ')),
+      (facts.length > 0 || extra.certification != null) && el('p', { class: 'watch-meta' }, ratingBadge(extra.certification), facts.join(' · ')),
       extra.overview && el('p', { class: 'watch-overview' }, extra.overview),
       el('a', { class: 'watch-detail-link', href: detailHref({ type, id }) }, 'Ver detalhes e títulos parecidos'),
     );
@@ -2174,6 +2345,23 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     const epIdx = episodes.indexOf(state.episode);
     prevBtn.disabled = seasonIdx <= 0 && epIdx <= 0;
     nextBtn.disabled = seasonIdx >= seasons.length - 1 && epIdx >= episodes.length - 1;
+    refreshNextCard(seasons, episodes, seasonIdx, epIdx);
+  }
+
+  // Série já concluída não mostra o cartão: ali "assistido" desmarca a série inteira (o botão do cabeçalho), não avança.
+  // Enquanto as listas de temporadas/episódios não chegaram não dá para saber se este é o último, então o texto fica
+  // genérico em vez de afirmar "Terminei a série" cedo demais. O servidor é quem decide o próximo de verdade (`next`).
+  function refreshNextCard(seasons, episodes, seasonIdx, epIdx) {
+    nextCard.hidden = state.done || state.season == null;
+    if (nextCard.hidden) return;
+    const loaded = state.seasons.length > 0 && state.episodes.length > 0;
+    const last = loaded && epIdx >= episodes.length - 1 && seasonIdx >= seasons.length - 1;
+    let label = null;
+    if (last) label = 'Última temporada concluída';
+    else if (loaded && epIdx < episodes.length - 1) label = `Próximo: T${state.season} · E${episodes[epIdx + 1]}`;
+    else if (loaded) label = `Próximo: T${seasons[seasonIdx + 1]} · 1º episódio`;
+    nextLabel.replaceChildren(...[label && `${label} · `, 'atalho: tecla ', el('kbd', {}, 'N')].filter(Boolean));
+    nextAction.textContent = last ? 'Terminei a série' : 'Próximo episódio ▶';
   }
 
   // O servidor registra o título no histórico e devolve o link do player (e, em série, de onde retomar).
@@ -2222,7 +2410,27 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
     followCast(cast);
   }
 
+  // Trava contra clique duplo / tecla N seguida: um segundo pedido sairia com o episódio antigo e marcaria o mesmo duas vezes.
+  let marking = false;
+
+  function finishEpisode() {
+    if (!nextCard.hidden) toggleDone();
+  }
+  if (isTv) watchHotkey = finishEpisode;
+
   async function toggleDone() {
+    if (marking) return;
+    marking = true;
+    doneBtn.disabled = nextAction.disabled = true;
+    try {
+      await markDoneRequest();
+    } finally {
+      marking = false;
+      doneBtn.disabled = nextAction.disabled = false;
+    }
+  }
+
+  async function markDoneRequest() {
     message.textContent = '';
     // Série ainda não concluída: marca o episódio atual e o servidor devolve o próximo (`next`), que já abrimos.
     const episodeMode = isTv && !state.done && state.season != null;
@@ -2310,6 +2518,306 @@ async function renderWatch(type, id, seasonArg, episodeArg, token) {
   }
 }
 
+// --- sorteio: "não sei o que ver" ---
+// O servidor sorteia entre os títulos bem avaliados e populares que a pessoa ainda não abriu (o "Quero ver" pode sair).
+// Cada "Sortear outro" manda junto os já mostrados (`skip`), então não repete nada até acabar, de forma determinista
+// (sem depender de sorte para não repetir). Os filtros ficam na URL, mas trocar de filtro NÃO refaz a rota: o endereço é
+// trocado com replaceState e o sorteio é refeito no lugar, para o foco não sair do chip que a pessoa acabou de apertar.
+
+const SURPRISE_DURATIONS = [
+  ['', 'Qualquer duração'],
+  ['90', 'Até 90 min'],
+  ['120', 'Até 120 min'],
+];
+
+function renderSurprise(params, token) {
+  let type = pickOption(params.get('tipo'), TYPE_OPTIONS, 'all');
+  let max = pickOption(params.get('max'), SURPRISE_DURATIONS, '');
+  let skip = []; // "movie:1", "tv:2"... já mostrados nesta sessão de sorteio (mais antigos saem se passar do teto)
+  let request = 0;
+
+  const status = el('p', { class: 'sr-only', role: 'status' });
+  const result = el('div', { class: 'surprise-result' });
+  const durationNote = el('p', { class: 'surprise-note' });
+
+  function chipGroup(label, id, options, current, onPick) {
+    const chips = options.map(([value, text]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(value === current()), onclick: () => onPick(value) }, text));
+    const group = el('div', { class: 'chips', role: 'group', 'aria-labelledby': id }, chips);
+    return {
+      root: el('div', { class: 'surprise-filter' }, el('p', { class: 'surprise-label', id }, label), group),
+      chips,
+      paint() {
+        chips.forEach((chip, i) => chip.setAttribute('aria-pressed', String(options[i][0] === current())));
+      },
+    };
+  }
+
+  const typeGroup = chipGroup('Tipo', 'surprise-type', TYPE_OPTIONS, () => type, (value) => change(() => (type = value)));
+  const durationGroup = chipGroup('Duração', 'surprise-duration', SURPRISE_DURATIONS, () => max, (value) => change(() => (max = value)));
+
+  // Série não tem duração: com "Só séries" o filtro de duração é desligado (e não é enviado). Com duração e "Filmes e
+  // séries", o servidor só devolve filmes, e o aviso diz isso.
+  function paintFilters() {
+    typeGroup.paint();
+    durationGroup.paint();
+    durationGroup.chips.forEach((chip) => (chip.disabled = type === 'tv'));
+    durationNote.textContent = type === 'tv' ? 'Séries não têm duração definida: o filtro de duração fica desligado.' : max && type === 'all' ? 'Com duração escolhida só aparecem filmes.' : '';
+    history.replaceState(history.state, '', hashWithQuery('#/sorteio', { tipo: type === 'all' ? '' : type, max }));
+  }
+
+  function change(apply) {
+    apply();
+    skip = [];
+    paintFilters();
+    draw();
+  }
+
+  function empty() {
+    const again = skip.length > 0;
+    result.replaceChildren(
+      el(
+        'div',
+        { class: 'state' },
+        el('p', {}, again ? 'Acabaram as sugestões com esses filtros.' : 'Nenhum título encontrado com esses filtros.'),
+        again && el('button', { class: 'btn', type: 'button', onclick: () => ((skip = []), draw()) }, 'Recomeçar'),
+        !again && el('p', {}, 'Tente outra duração ou outro tipo.'),
+      ),
+    );
+    status.textContent = again ? 'Acabaram as sugestões com esses filtros.' : 'Nenhum título encontrado com esses filtros.';
+  }
+
+  function show(item, inWatchlist) {
+    const src = posterUrl(item.poster, 'w500');
+    const message = el('p', { class: 'form-error', role: 'alert' });
+    const facts = [item.year, item.rating != null && `★ ${item.rating.toFixed(1)}`, item.runtime && `${item.runtime} min`].filter(Boolean).join(' · ');
+    result.replaceChildren(
+      el(
+        'article',
+        { class: 'surprise-card' },
+        src ? el('img', { class: 'surprise-poster', src, alt: '' }) : el('div', { class: 'surprise-poster card-fallback' }, item.title),
+        el(
+          'div',
+          { class: 'surprise-body' },
+          el('h2', {}, item.title),
+          facts && el('p', { class: 'detail-meta' }, ratingBadge(item.certification), facts),
+          item.genres?.length > 0 && el('ul', { class: 'tags' }, item.genres.map((name) => el('li', {}, name))),
+          item.overview ? el('p', { class: 'detail-overview' }, item.overview) : el('p', { class: 'detail-overview empty' }, 'Sem sinopse no catálogo.'),
+          el(
+            'div',
+            { class: 'detail-actions' },
+            el('a', { class: 'btn primary', href: watchHref(item) }, '▶ Assistir'),
+            el('a', { class: 'btn', href: detailHref(item) }, 'Ver detalhes'),
+            watchlistButton(item.type, item.id, inWatchlist, message),
+            el('button', { class: 'btn', type: 'button', onclick: () => draw() }, icon('shuffle'), 'Sortear outro'),
+          ),
+          message,
+        ),
+      ),
+    );
+    status.textContent = `Sugestão: ${item.title}${item.year ? ` (${item.year})` : ''}`;
+  }
+
+  async function draw() {
+    const mine = ++request;
+    result.setAttribute('aria-busy', 'true');
+    result.replaceChildren(spinner('Sorteando…'));
+    const query = new URLSearchParams({ type });
+    if (type !== 'tv' && max) query.set('max', max);
+    if (skip.length) query.set('skip', skip.slice(-SURPRISE_SKIP_MAX).join(','));
+    let data;
+    try {
+      data = await api(`me/surprise?${query}`);
+    } catch (err) {
+      if (token === navToken && mine === request) {
+        result.removeAttribute('aria-busy');
+        result.replaceChildren(errorState(err.message, draw));
+      }
+      return;
+    }
+    if (token !== navToken || mine !== request) return;
+    result.removeAttribute('aria-busy');
+    if (!data.item) return empty();
+    const key = `${data.item.type}:${data.item.id}`;
+    skip = [...skip.filter((entry) => entry !== key), key].slice(-SURPRISE_SKIP_MAX);
+    remember([{ type: data.item.type, id: data.item.id, title: data.item.title, year: data.item.year, poster: data.item.poster }]);
+    show(data.item, data.inWatchlist);
+  }
+
+  app.replaceChildren(
+    el(
+      'div',
+      { class: 'page surprise-page' },
+      el('h1', {}, 'Não sei o que ver'),
+      el('p', { class: 'auth-hint' }, 'Sorteamos um título bem avaliado que você ainda não abriu. Não gostou? É só sortear outro.'),
+      typeGroup.root,
+      durationGroup.root,
+      durationNote,
+      status,
+      result,
+    ),
+  );
+  paintFilters();
+  draw();
+}
+
+// --- pedido de título: pedir o que não está no catálogo ---
+// O pedido vai por e-mail ao administrador (o servidor cuida dos limites). A lista abaixo do formulário "se atende
+// sozinha": o servidor confere na hora se o título já entrou no catálogo (`inCatalog`), então não há aviso a mandar.
+
+const REQUEST_TYPES = [
+  ['any', 'Filme ou série'],
+  ['movie', 'Filme'],
+  ['tv', 'Série'],
+];
+const REQUEST_TYPE_NAMES = { any: 'Filme ou série', movie: 'Filme', tv: 'Série' };
+
+function renderRequests(params, token) {
+  const prefill = (params.get('titulo') ?? '').replace(/\s+/g, ' ').trim().slice(0, REQUEST_TITLE_MAX);
+
+  const titleRoot = field('Título', 'request-title', { type: 'text', maxlength: String(REQUEST_TITLE_MAX), autocomplete: 'off', placeholder: 'Nome do filme ou da série', value: prefill });
+  const yearRoot = field('Ano (opcional)', 'request-year', { type: 'number', min: '1800', max: '2100', inputmode: 'numeric', autocomplete: 'off', placeholder: 'Ex.: 1999', required: false });
+  const noteRoot = field('Observação (opcional)', 'request-note', { type: 'text', maxlength: String(REQUEST_NOTE_MAX), autocomplete: 'off', placeholder: 'Diretor, elenco, onde viu falar…', required: false });
+  const typeSelect = el('select', { id: 'request-type' }, REQUEST_TYPES.map(([value, text]) => el('option', { value }, text)));
+  const titleInput = titleRoot.querySelector('input');
+  const yearInput = yearRoot.querySelector('input');
+  const noteInput = noteRoot.querySelector('input');
+
+  const info = el('p', { class: 'form-info', role: 'status' });
+  const found = el('p', { class: 'request-found', role: 'status', hidden: true });
+  const error = el('p', { class: 'form-error', role: 'alert' });
+  const submit = el('button', { class: 'btn primary', type: 'submit' }, 'Enviar pedido');
+  const listBox = el('section', { class: 'panel', 'aria-labelledby': 'requests-heading' });
+  const listStatus = el('p', { class: 'sr-only', role: 'status' });
+
+  const form = el(
+    'form',
+    {
+      class: 'panel',
+      novalidate: true,
+      onsubmit: async (event) => {
+        event.preventDefault();
+        info.textContent = '';
+        error.textContent = '';
+        found.hidden = true;
+        const title = titleInput.value.replace(/\s+/g, ' ').trim();
+        const note = noteInput.value.replace(/\s+/g, ' ').trim();
+        const year = yearInput.value.trim() ? Number(yearInput.value) : null;
+        const titleOk = title.length >= 2 && title.length <= REQUEST_TITLE_MAX;
+        const yearOk = year === null || (Number.isInteger(year) && year >= 1800 && year <= 2100);
+        setFieldState(titleRoot, titleOk ? null : 'invalid', titleOk ? '' : 'Informe o título (2 a 100 caracteres).');
+        setFieldState(yearRoot, yearOk ? null : 'invalid', yearOk ? '' : 'Informe um ano entre 1800 e 2100, ou deixe em branco.');
+        if (!titleOk || !yearOk) {
+          (titleOk ? yearInput : titleInput).focus();
+          return;
+        }
+        setBusy(submit, true, 'Enviando…');
+        try {
+          const body = { title, type: typeSelect.value };
+          if (year !== null) body.year = year;
+          if (note) body.note = note;
+          const data = await api('me/requests', { method: 'POST', body });
+          info.textContent = data.duplicate ? 'Você já tinha pedido este título. Ele continua na lista abaixo.' : 'Pedido enviado. Quando o título entrar no catálogo, ele aparece como disponível aqui.';
+          if (!data.duplicate) {
+            titleInput.value = yearInput.value = noteInput.value = '';
+            typeSelect.value = 'any';
+          }
+          loadList();
+        } catch (err) {
+          const item = err.code === 'already_in_catalog' ? err.data?.item : null;
+          if (item) {
+            // Não é erro: o título já existe, então o melhor resultado é levar a pessoa até ele.
+            found.replaceChildren(`“${item.title}`, item.year ? ` (${item.year})` : '', '” já está no catálogo. ', el('a', { href: detailHref(item) }, 'Abrir o título'));
+            found.hidden = false;
+          } else {
+            error.textContent = err.message;
+          }
+        } finally {
+          setBusy(submit, false, 'Enviar pedido');
+        }
+      },
+    },
+    el('h2', {}, 'Pedir um título'),
+    el('p', { class: 'auth-hint' }, 'Não achou o que queria? Diga qual é e avisamos o administrador. Você vê aqui quando ele entrar no catálogo.'),
+    titleRoot,
+    el('div', { class: 'field' }, el('label', { for: 'request-type' }, 'Tipo'), typeSelect),
+    yearRoot,
+    noteRoot,
+    info,
+    found,
+    error,
+    el('div', { class: 'genres-actions' }, submit),
+  );
+  titleInput.addEventListener('input', () => setFieldState(titleRoot, null));
+  yearInput.addEventListener('input', () => setFieldState(yearRoot, null));
+
+  function requestRow(request) {
+    const available = request.inCatalog;
+    const when = new Date(request.createdAt);
+    const details = [REQUEST_TYPE_NAMES[request.type] ?? request.type, request.year, Number.isNaN(when.getTime()) ? null : `pedido em ${when.toLocaleDateString('pt-BR')}`].filter(Boolean).join(' · ');
+    const li = el(
+      'li',
+      { class: 'request-item' },
+      el(
+        'div',
+        { class: 'request-main' },
+        el('p', { class: 'request-title' }, request.title),
+        el('p', { class: 'request-meta' }, details),
+        request.note && el('p', { class: 'request-note' }, request.note),
+      ),
+      el(
+        'div',
+        { class: 'request-side' },
+        el('span', { class: available ? 'request-state ok' : 'request-state' }, available ? 'Já está no catálogo' : 'Pendente'),
+        available && el('a', { class: 'btn small', href: detailHref(available) }, 'Abrir título'),
+        el(
+          'button',
+          {
+            class: 'btn small',
+            type: 'button',
+            'aria-label': `Cancelar o pedido de ${request.title}`,
+            onclick: async (event) => {
+              const button = event.currentTarget;
+              if (!(await confirmDialog('Cancelar o pedido?', `O pedido de “${request.title}” será removido da sua lista.`, 'Cancelar pedido', 'Manter'))) return;
+              button.disabled = true;
+              try {
+                await api('me/requests/cancel', { method: 'POST', body: { id: request.id } });
+                listStatus.textContent = `Pedido de ${request.title} cancelado.`;
+                loadList();
+              } catch (err) {
+                button.disabled = false;
+                if (err.status === 404) loadList(); // já tinha sumido (outra aba): só atualiza
+                else error.textContent = err.message;
+              }
+            },
+          },
+          'Cancelar',
+        ),
+      ),
+    );
+    return li;
+  }
+
+  let listRequest = 0;
+  async function loadList() {
+    const mine = ++listRequest;
+    listBox.replaceChildren(el('h2', { id: 'requests-heading' }, 'Seus pedidos'), spinner());
+    try {
+      const data = await api('me/requests');
+      if (token !== navToken || mine !== listRequest) return;
+      listBox.replaceChildren(
+        el('h2', { id: 'requests-heading' }, 'Seus pedidos'),
+        data.items.length ? el('ul', { class: 'request-list' }, data.items.map(requestRow)) : el('p', { class: 'empty' }, 'Você ainda não pediu nenhum título.'),
+      );
+    } catch (err) {
+      if (token === navToken && mine === listRequest) listBox.replaceChildren(el('h2', { id: 'requests-heading' }, 'Seus pedidos'), errorState(err.message, loadList));
+    }
+  }
+
+  app.replaceChildren(el('div', { class: 'page account-page' }, el('h1', {}, 'Pedidos de títulos'), form, listBox, listStatus));
+  titleInput.focus();
+  loadList();
+}
+
 // --- roteador ---
 
 function setActiveNav(key) {
@@ -2319,6 +2827,7 @@ function setActiveNav(key) {
 function route() {
   const token = ++navToken;
   watchGuard = null;
+  watchHotkey = null;
   clearInterval(heroTimer);
   document.title = 'Cine Local';
   window.scrollTo(0, 0);
@@ -2388,6 +2897,16 @@ function route() {
     setActiveNav('directors');
     searchInput.value = '';
     return renderDirector(match[1], token);
+  }
+  if (hash === '#/sorteio') {
+    setActiveNav('surprise');
+    searchInput.value = '';
+    return renderSurprise(params, token);
+  }
+  if (hash === '#/pedidos') {
+    setActiveNav(null);
+    searchInput.value = '';
+    return renderRequests(params, token);
   }
   if (hash === '#/perfil') {
     setActiveNav(null);

@@ -19,13 +19,19 @@
  *   Chaves curtas: i id · t título · ot título original · y ano · d data · p pôster · b backdrop · r nota ·
  *   n votos · v popularidade · o sinopse · rt duração (filme) · g ids de gênero (filme e série, cada um no seu
  *   conjunto de ids) · dr ids dos diretores (filme) · s temporadas [[número, episódios], ...] (série) · a data em que
- *   o título entrou no catálogo.
+ *   o título entrou no catálogo · c classificação indicativa do Brasil (0 livre, 10, 12, 14, 16, 18).
  *   Topo do arquivo: `genres` (filme) e `tvGenres` (série) = { idDoGênero: "nome em pt-BR" } e `directors` =
  *   { idDaPessoa: { n: nome, p: foto } }, só de quem dirigiu algum filme que ficou na foto.
  * - Diretores: vêm da MESMA chamada do filme (`append_to_response=credits`), então não custam nenhuma requisição a
  *   mais. Diretor = quem tem `job: "Director"` na equipe (até MAX_DIRECTORS por filme: codireção conta para os dois;
  *   passar disso é lista de unidade/segunda equipe). Séries não têm diretor único, ficam de fora. Um gate barra a foto
  *   em que quase nenhum filme trouxe diretor (mudança de formato do TMDB): sem ele o site perderia a seção em silêncio.
+ * - Classificação indicativa (`c`, alimenta o "modo família" do site): vem das MESMAS chamadas (filme: `release_dates`, série:
+ *   `content_ratings`, via `append_to_response`), então não custa requisição a mais. Vale a do Brasil; quando o TMDB não tem
+ *   a brasileira, converte a dos EUA por uma tabela conservadora (na dúvida, a faixa mais restrita: PG-13 vira 14, R vira 16).
+ *   Título sem nenhuma das duas fica sem `c` e o modo família o esconde (conservador de propósito). Se houver mais de uma
+ *   certificação do Brasil no mesmo título (estreia e relançamento), vale a mais alta. Um gate barra a foto em que quase nada
+ *   trouxe classificação (mudança de formato do TMDB): sem ele o modo família esconderia o catálogo inteiro em silêncio.
  * - `a` (alimenta a fileira "Novidades da semana"): só id que NÃO estava na foto anterior ganha `a` = data da coleta; quem
  *   já estava mantém o `a` que tinha, e `a` com mais de A_KEEP_DAYS dias é descartado (a fileira só olha a última semana,
  *   guardar para sempre só incharia o arquivo). Se a foto anterior está vazia ou não existe, NADA ganha `a`: senão a
@@ -60,6 +66,7 @@ export const GATES = {
   maxNotFoundRatio: 0.1,
   minVsPreviousRatio: 0.9,
   minDirectedRatio: 0.5, // no TMDB real passa de 90% dos filmes
+  minRatedRatio: 0.3, // classificação indicativa (BR, ou EUA convertida) em ao menos 30% dos títulos
 };
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -160,10 +167,40 @@ export function directorsOf(d) {
   return found;
 }
 
+// Classificação dos EUA -> faixa do Brasil, só quando o TMDB não tem a brasileira. Sempre a faixa mais restrita plausível.
+const US_TO_BR = { G: 0, PG: 10, 'PG-13': 14, R: 16, 'NC-17': 18, 'TV-Y': 0, 'TV-Y7': 0, 'TV-G': 0, 'TV-PG': 10, 'TV-14': 14, 'TV-MA': 18 };
+const BR_RATING = /^(?:L|0|10|12|14|16|18)$/;
+const brValue = (text) => (text === 'L' ? 0 : Number(text));
+
+// `entries` = textos de classificação de um país (já extraídos da resposta do TMDB).
+function certificationFrom(entriesByCountry) {
+  const br = (entriesByCountry.BR ?? []).map((text) => String(text ?? '').trim().toUpperCase()).filter((text) => BR_RATING.test(text)).map(brValue);
+  if (br.length) return Math.max(...br);
+  const us = (entriesByCountry.US ?? []).map((text) => US_TO_BR[String(text ?? '').trim().toUpperCase()]).filter((value) => value !== undefined);
+  return us.length ? Math.max(...us) : undefined;
+}
+
+export function movieCertification(d) {
+  const byCountry = {};
+  for (const country of Array.isArray(d?.release_dates?.results) ? d.release_dates.results : []) {
+    if (country?.iso_3166_1 !== 'BR' && country?.iso_3166_1 !== 'US') continue;
+    (byCountry[country.iso_3166_1] ??= []).push(...(Array.isArray(country.release_dates) ? country.release_dates : []).map((release) => release?.certification));
+  }
+  return certificationFrom(byCountry);
+}
+
+export function seriesCertification(d) {
+  const byCountry = {};
+  for (const country of Array.isArray(d?.content_ratings?.results) ? d.content_ratings.results : []) {
+    if (country?.iso_3166_1 === 'BR' || country?.iso_3166_1 === 'US') (byCountry[country.iso_3166_1] ??= []).push(country.rating);
+  }
+  return certificationFrom(byCountry);
+}
+
 export function compactMovie(d) {
   if (!d || d.adult === true || !d.title) return null;
   const directors = [...directorsOf(d).keys()];
-  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined, g: genreIds(d), dr: directors.length ? directors : undefined };
+  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined, g: genreIds(d), dr: directors.length ? directors : undefined, c: movieCertification(d) };
 }
 
 export function compactSeries(d, today) {
@@ -181,7 +218,7 @@ export function compactSeries(d, today) {
       seasons.push([number, count]);
     }
   }
-  return { ...common(d, d.name, d.original_name, d.first_air_date), g: genreIds(d), s: seasons };
+  return { ...common(d, d.name, d.original_name, d.first_air_date), g: genreIds(d), s: seasons, c: seriesCertification(d) };
 }
 
 // --- coleta no TMDB ---
@@ -208,7 +245,7 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
       const [kind, id] = jobs[cursor++];
       try {
         await pace();
-        const reply = await requestJson(`${TMDB}/${kind}/${id}?language=pt-BR${kind === 'movie' ? '&append_to_response=credits' : ''}`, {
+        const reply = await requestJson(`${TMDB}/${kind}/${id}?language=pt-BR&append_to_response=${kind === 'movie' ? 'credits,release_dates' : 'content_ratings'}`, {
           fetchImpl,
           sleep,
           timeoutMs: TMDB_TIMEOUT_MS,
@@ -255,12 +292,15 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
 
 export const MIN_GENRES = 10; // o TMDB tem cerca de 19 gêneros de filme
 
-export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES, movies = 0, directed = movies }) {
+export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES, movies = 0, directed = movies, rated = kept }) {
   const problems = [];
   if (kept === 0) problems.push('nenhum título coletado');
   if (kept > 0 && genreCount < MIN_GENRES) problems.push(`o TMDB devolveu só ${genreCount} gêneros (esperado ao menos ${MIN_GENRES}); a seleção de gêneros ficaria quebrada`);
   if (movies > 0 && directed / movies < GATES.minDirectedRatio) {
     problems.push(`só ${directed} de ${movies} filmes trouxeram diretor (mínimo ${GATES.minDirectedRatio * 100}%); a seção de diretores ficaria quase vazia`);
+  }
+  if (kept > 0 && rated / kept < GATES.minRatedRatio) {
+    problems.push(`só ${rated} de ${kept} títulos trouxeram classificação indicativa (mínimo ${GATES.minRatedRatio * 100}%); o modo família esconderia quase tudo`);
   }
   if (stats.total > 0 && stats.failed / stats.total > GATES.maxFailedRatio) {
     problems.push(`falhas de rede/TMDB demais: ${stats.failed} de ${stats.total} (teto ${GATES.maxFailedRatio * 100}%)`);
@@ -365,7 +405,8 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
   const genreCount = Object.keys(collected.genres).length;
   const previous = await loadPrevious(file);
   const directed = collected.movies.filter((movie) => movie.dr).length;
-  const problems = checkGates({ stats, kept, previousTotal: previous.total, genreCount, movies: collected.movies.length, directed });
+  const rated = [...collected.movies, ...collected.series].filter((entry) => entry.c !== undefined).length;
+  const problems = checkGates({ stats, kept, previousTotal: previous.total, genreCount, movies: collected.movies.length, directed, rated });
   if (problems.length) {
     const error = new Error(`snapshot rejeitado, o catálogo atual foi mantido:\n  - ${problems.join('\n  - ')}`);
     error.stats = stats;
@@ -380,6 +421,7 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
     series: collected.series.length,
     generos: genreCount,
     diretores: Object.keys(collected.directors).length,
+    classificados: rated,
     novos,
     inexistentesNoTmdb: stats.notFound,
     falhas: stats.failed,

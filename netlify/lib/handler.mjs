@@ -65,10 +65,35 @@
  *   os parâmetros. Busca com 1 caractere é erro (como na busca de títulos), vazia é "sem filtro". Diretor desconhecido
  *   responde 410 como título fora do catálogo.
  * - Rotas novas respondem 410 (não 404) para "título fora do catálogo": o `netlify dev` reenvia 404 para outro caminho.
+ *
+ * Decisões do selo "Novo episódio":
+ * - Cada série da biblioteca guarda `seenTotal` (total de episódios do catálogo na última interação: abrir ou marcar). A
+ *   leitura compara com o total de hoje: maior = `fresh: true`. Item antigo, sem `seenTotal`, nunca ganha selo (não há como
+ *   saber o que a pessoa já tinha visto), e série fora do catálogo também não.
+ * - Série concluída com episódio novo é mostrada em "continuar" (não em "assistidos") apontando para o episódio novo, mas SÓ
+ *   na leitura: nada é gravado. Se a pessoa nunca abrir o episódio, o registro continua "concluída" e nada se perde.
+ *   Abrir exatamente o episódio que vem depois do último concluído reabre a série (done=false, sem doneAt); abrir qualquer
+ *   outro episódio de uma série concluída NÃO desfaz o "concluída" (rever um episódio antigo não é abandonar a série).
+ *   Limitação conhecida: rever um episódio antigo move a posição salva, e o "episódio seguinte" passa a ser calculado a
+ *   partir dela (não do último episódio concluído).
+ *
+ * Decisões de descoberta, pedidos e modo família:
+ * - Sorteio (`GET /api/me/surprise`): o servidor não guarda estado da rodada; o front manda `skip` com o que já mostrou (até 40).
+ *   Exclui o que já está na biblioteca, mas não a lista "Quero ver" (é um bom candidato). `random` é injetado para teste.
+ * - Pedido de título: um registro por usuário (store `requests`), com a mesma escrita condicional da biblioteca. A chave é
+ *   tipo + título normalizado (a mesma normalização do catálogo) e o id público deriva dela, então repetir o pedido é
+ *   idempotente (200 `duplicate`) e não gasta limite nem e-mail. Título que o catálogo já tem não vira pedido (409
+ *   `already_in_catalog` com o título). O aviso ao admin é melhor esforço e tem teto diário próprio: o pedido já está gravado
+ *   e falha de e-mail não o desfaz. `inCatalog` é calculado na leitura, então o pedido "se atende sozinho" quando o título entra.
+ * - Modo família (`maxRating` no usuário): toda rota que lê o catálogo usa `catalog.forRating(maxRating)`. Com o modo ligado,
+ *   play, TV, título, temporadas, episódios, marcar e "quero ver" exigem título visível na visão, inclusive o que saiu do catálogo
+ *   (sem catálogo não há como checar a classificação); sem o modo, o comportamento anterior é preservado. Biblioteca e
+ *   recomendações escondem (não apagam) o que a visão não conhece. Afrouxar o limite exige a senha da conta (ver
+ *   `setRatingLimit`); a senha errada é 400 `wrong_password`, e senha ausente é 400 `password_required`.
  */
 
 import { burnPasswordCheck, hashPassword, readSecret, sha256Hex, signToken, verifyPassword, verifyToken } from './auth.mjs';
-import { embedUrl } from './catalog.mjs';
+import { embedUrl, normalizeTitle } from './catalog.mjs';
 import { HttpError } from './errors.mjs';
 import { clear, increment, isBlocked } from './limits.mjs';
 import { createTv, normalizeCode } from './tv.mjs';
@@ -84,6 +109,8 @@ const LIBRARY_CAP = 300;
 const WATCHLIST_CAP = 200;
 const CONTINUE_LIMIT = 30;
 const WATCHED_LIMIT = 60;
+const REQUEST_CAP = 30;
+const SKIP_CAP = 40;
 
 const REGISTER_PER_IP = { limit: 5, windowMs: HOUR_MS };
 const LOGIN_FAILS_PER_EMAIL = { limit: 5, windowMs: 15 * 60 * 1000 };
@@ -93,10 +120,14 @@ const DECISION_PER_IP = { limit: 30, windowMs: HOUR_MS };
 const FORGOT_PER_IP = { limit: 5, windowMs: HOUR_MS };
 const FORGOT_PER_EMAIL = { limit: 3, windowMs: HOUR_MS };
 const RESET_PER_IP = { limit: 20, windowMs: HOUR_MS };
+const REQUESTS_PER_USER = { limit: 5, windowMs: DAY_MS };
 const DAILY_ADMIN_NOTICES = 30;
+const DAILY_REQUEST_MAILS = 20;
 const DAILY_USER_MAILS = 30;
 
 const USER_ID_RE = /^u_[0-9a-f]{40}$/;
+const REQUEST_ID_RE = /^[0-9a-f]{16}$/;
+const SKIP_ENTRY_RE = /^(movie|tv):\d{1,9}$/;
 const ACCEPTED_MESSAGE = 'Solicitação recebida. Você poderá entrar assim que o cadastro for aprovado.';
 const FORGOT_MESSAGE = 'Se existir uma conta aprovada com esse e-mail, enviamos um link para escolher uma nova senha. O link vale por 1 hora.';
 const PASSWORD_MESSAGE = `A senha precisa ter de ${v.PASSWORD_MIN} a ${v.PASSWORD_MAX} caracteres, com letra maiúscula, minúscula, número e um símbolo (@, _ ou .)`;
@@ -145,7 +176,7 @@ function readFilters(url) {
   return { type, from, to };
 }
 
-export function createHandler({ stores, catalog, mailer, acceptsMail, env, now = Date.now }) {
+export function createHandler({ stores, catalog, mailer, acceptsMail, env, now = Date.now, random = Math.random }) {
   const nowSeconds = () => Math.floor(now() / 1000);
   const nowIso = () => new Date(now()).toISOString();
   const userId = (email) => `u_${sha256Hex(email).slice(0, 40)}`;
@@ -223,11 +254,23 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return picked.length === 2 ? picked : null;
   }
 
+  // Limite do modo família do usuário (null = sem limite). Valor gravado que não é uma das opções vale como "sem limite".
+  const ratingOf = (user) => (v.RATING_OPTIONS.includes(user.maxRating) ? user.maxRating : null);
+
+  // Catálogo como ESTE usuário o enxerga: com o modo família ligado é a visão filtrada por classificação; sem ele, o próprio catálogo.
+  const viewOf = (user) => catalog.forRating(ratingOf(user));
+
+  // Com o modo família ligado, só vale título que a visão conhece. Inclusive título que saiu do catálogo: sem catálogo não há
+  // como checar a classificação, e na dúvida o modo bloqueia. Sem o modo, nada muda (o play ainda aceita título fora do catálogo).
+  function requireVisible(user, view, type, mediaId) {
+    if (ratingOf(user) !== null && !view.lookup(type, mediaId)) throw titleGone();
+  }
+
   // Única forma de montar o que sai do registro do usuário: nunca devolve hash de senha, e-mail nem status.
   // `needsGenres` só é verdadeiro se o catálogo tem opções de gênero (catálogo antigo não obriga ninguém a escolher).
   function profile(user) {
     const genres = pickedGenres(user);
-    return { name: user.name, genres, needsGenres: genres === null && catalog.genres().length > 0 };
+    return { name: user.name, genres, needsGenres: genres === null && catalog.genres().length > 0, maxRating: ratingOf(user) };
   }
 
   async function guard(prefix, subject, { limit, windowMs }) {
@@ -437,6 +480,24 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     throw conflict();
   }
 
+  // Pedidos de título: um registro por usuário, mesma escrita condicional da biblioteca. `mutate` pode devolver
+  // `{ unchanged: true, ... }` para não regravar (pedido repetido).
+  async function updateRequests(id, mutate) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const entry = await stores.requests.get(id);
+      const record = entry?.value ?? { items: {} };
+      record.items ??= {};
+      const result = mutate(record);
+      if (result?.unchanged) return result;
+
+      keepNewest(record.items, REQUEST_CAP, 'createdAt');
+
+      const saved = entry ? await stores.requests.put(id, record, entry.etag) : await stores.requests.create(id, record);
+      if (saved) return result;
+    }
+    throw conflict();
+  }
+
   function publicItem(item) {
     return {
       type: item.type,
@@ -448,6 +509,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       episode: item.episode,
       done: item.done,
       lastViewedAt: item.lastViewedAt,
+      ...(item.fresh && { fresh: true }),
     };
   }
 
@@ -455,7 +517,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return { type: item.type, id: item.id, title: item.title, year: item.year, poster: item.poster, addedAt: item.addedAt };
   }
 
-  async function play(req, { id: uid }) {
+  async function play(req, { id: uid, user }) {
     const body = await readJson(req);
     const type = v.validType(body.type);
     const mediaId = v.validId(body.id);
@@ -471,7 +533,9 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     if ((body.title != null && !title) || (body.year != null && !year) || (body.poster != null && !poster)) throw v.badRequest();
 
     // O catálogo do servidor é a fonte do metadado; o que o navegador manda só vale para título que saiu do catálogo.
-    const known = catalog.lookup(type, mediaId);
+    const view = viewOf(user);
+    requireVisible(user, view, type, mediaId);
+    const known = view.lookup(type, mediaId);
     const item = await updateLibrary(uid, (library) => {
       const itemKey = `${type}:${mediaId}`;
       const prev = library.items[itemKey];
@@ -487,15 +551,38 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
         lastViewedAt: nowIso(),
       };
       if (prev?.doneAt) next.doneAt = prev.doneAt;
+      if (type === 'tv') {
+        // Total de episódios visto agora: é a base do selo "Novo episódio" (ver GET /api/me/library).
+        const total = view.episodeCount(mediaId);
+        const seen = total ?? prev?.seenTotal;
+        if (seen != null) next.seenTotal = seen;
+        // Abrir justo o episódio que veio depois do último de uma série concluída reabre a série; qualquer outro episódio não
+        // desfaz o "concluída" (rever o 1º episódio não significa que a pessoa parou de ter terminado).
+        if (prev?.done) {
+          const following = view.nextEpisode(mediaId, prev.season, prev.episode);
+          if (following && following.season === next.season && following.episode === next.episode) {
+            next.done = false;
+            delete next.doneAt;
+          } else {
+            // Rever um episódio antigo de série concluída não mexe no registro (posição, "concluída" e `seenTotal`): senão o
+            // episódio novo que ainda não foi aberto perderia o selo e a posição de onde o "próximo" é calculado.
+            next.season = prev.season;
+            next.episode = prev.episode;
+            if (prev.seenTotal != null) next.seenTotal = prev.seenTotal;
+          }
+        }
+      }
       library.items[itemKey] = next;
       delete library.watchlist[itemKey]; // começou a ver: sai de "Quero ver" e passa a "Continuar assistindo"
       return next;
     });
 
-    return json(200, { url: embedUrl(type, mediaId, item.season, item.episode), ...publicItem(item), info: known ? catalog.info(type, mediaId) : null });
+    // O que toca é o episódio pedido, mesmo quando o registro guardou outra posição (série concluída revista).
+    const played = type === 'tv' && season != null ? { season, episode: episode ?? 1 } : { season: item.season, episode: item.episode };
+    return json(200, { url: embedUrl(type, mediaId, played.season, played.episode), ...publicItem(item), ...(type === 'tv' && played), info: known ? view.info(type, mediaId) : null });
   }
 
-  async function markDone(req, { id: uid }) {
+  async function markDone(req, { id: uid, user }) {
     const body = await readJson(req);
     const type = v.validType(body.type);
     const mediaId = v.validId(body.id);
@@ -505,11 +592,17 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     const episode = body.episode == null ? null : v.intInRange(body.episode, 1, 999);
     if ((body.season != null && season === null) || (body.episode != null && episode === null) || (season === null) !== (episode === null)) throw v.badRequest();
 
+    const view = viewOf(user);
+    requireVisible(user, view, type, mediaId);
     let next = null;
     const item = await updateLibrary(uid, (library) => {
       const current = library.items[`${type}:${mediaId}`];
       if (!current) throw new HttpError(404, 'Título não está na sua lista', 'not_found');
-      next = type === 'tv' && body.done && season !== null ? catalog.nextEpisode(mediaId, season, episode) : null;
+      next = type === 'tv' && body.done && season !== null ? view.nextEpisode(mediaId, season, episode) : null;
+      if (type === 'tv') {
+        const total = view.episodeCount(mediaId);
+        if (total != null) current.seenTotal = total;
+      }
       if (next) {
         // Episódio visto e ainda tem o seguinte: a série continua em andamento, agora no próximo episódio.
         current.season = next.season;
@@ -526,10 +619,36 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return json(200, { ...publicItem(item), ...(next && { next }) });
   }
 
-  async function library({ id: uid }) {
-    const entry = await stores.library.get(uid);
-    const items = Object.values(entry?.value.items ?? {}).sort((a, b) => b.lastViewedAt.localeCompare(a.lastViewedAt));
-    const watchlist = Object.values(entry?.value.watchlist ?? {}).sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  // Série com episódio novo desde a última interação (total de hoje > `seenTotal`): ganha `fresh`. Se estava concluída, a leitura a
+  // trata como em andamento, apontando para o episódio novo; NADA é gravado aqui (se o episódio nunca for aberto, a série continua
+  // concluída no registro). Item antigo sem `seenTotal` não tem selo. Série fora do catálogo ou sem próximo episódio, também não.
+  function withFreshness(view, item) {
+    if (item.type !== 'tv' || typeof item.seenTotal !== 'number') return item;
+    const total = view.episodeCount(item.id);
+    if (total === null || total <= item.seenTotal) return item;
+    if (!item.done) return { ...item, fresh: true };
+    const following = view.nextEpisode(item.id, item.season, item.episode);
+    return following ? { ...item, done: false, season: following.season, episode: following.episode, fresh: true } : item;
+  }
+
+  // Itens da biblioteca que o usuário pode ver: com o modo família ligado, só o que a visão conhece.
+  async function visibleLibrary(user, uid) {
+    const view = viewOf(user);
+    const record = (await stores.library.get(uid))?.value;
+    const limited = ratingOf(user) !== null;
+    const keep = (item) => !limited || view.lookup(item.type, item.id);
+    return {
+      view,
+      record,
+      items: Object.values(record?.items ?? {}).filter(keep),
+      watchlist: Object.values(record?.watchlist ?? {}).filter(keep),
+    };
+  }
+
+  async function library({ id: uid, user }) {
+    const { view, items: stored, watchlist: listed } = await visibleLibrary(user, uid);
+    const items = stored.map((item) => withFreshness(view, item)).sort((a, b) => b.lastViewedAt.localeCompare(a.lastViewedAt));
+    const watchlist = listed.sort((a, b) => b.addedAt.localeCompare(a.addedAt));
     return json(200, {
       continue: items.filter((i) => !i.done).slice(0, CONTINUE_LIMIT).map(publicItem),
       watched: items.filter((i) => i.done).slice(0, WATCHED_LIMIT).map(publicItem),
@@ -537,7 +656,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     });
   }
 
-  async function setWatchlist(req, { id: uid }) {
+  async function setWatchlist(req, { id: uid, user }) {
     const body = await readJson(req);
     const type = v.validType(body.type);
     const mediaId = v.validId(body.id);
@@ -545,7 +664,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     const key = `${type}:${mediaId}`;
 
     if (body.add) {
-      const known = catalog.lookup(type, mediaId);
+      const known = viewOf(user).lookup(type, mediaId);
       if (!known) throw titleGone();
       await updateLibrary(uid, (library) => {
         library.watchlist[key] ??= { type, id: mediaId, title: known.title, year: known.year, poster: known.poster, addedAt: nowIso() };
@@ -560,8 +679,13 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
 
   // --- detalhe do título ---
 
-  async function title(type, mediaId, { id: uid }) {
-    const detail = catalog.detail(type, mediaId);
+  // Mesma leitura de progresso da biblioteca (`withFreshness`): o detalhe e a home não podem discordar sobre a mesma série.
+  const progressOf = (item) => ({ season: item.season, episode: item.episode, done: item.done, ...(item.fresh && { fresh: true }) });
+
+  async function title(type, mediaId, { id: uid, user }) {
+    const view = viewOf(user);
+    requireVisible(user, view, type, mediaId);
+    const detail = view.detail(type, mediaId);
     if (!detail) throw titleGone();
     const library = (await stores.library.get(uid))?.value;
     const key = `${type}:${mediaId}`;
@@ -569,20 +693,20 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return json(200, {
       ...detail,
       inWatchlist: Boolean(library?.watchlist?.[key]),
-      progress: seen ? { season: seen.season, episode: seen.episode, done: seen.done } : null,
+      progress: seen ? progressOf(withFreshness(view, seen)) : null,
     });
   }
 
   // --- explorar ---
 
-  async function browse(url) {
+  async function browse(url, { user }) {
     const { type, from, to } = readFilters(url);
     const params = url.searchParams;
     const genre = params.has('genre') ? v.intParam(params.get('genre'), 1, 99999) : null;
     const minRating = params.has('rating') ? v.ratingParam(params.get('rating')) : null;
     const page = params.has('page') ? Number(params.get('page')) : 1;
     if ((params.has('genre') && genre === null) || (params.has('rating') && minRating === null) || !v.intInRange(page, 1, 2000)) throw v.badRequest();
-    return json(200, await catalog.browse({ type, genre, from, to, minRating, page }));
+    return json(200, await viewOf(user).browse({ type, genre, from, to, minRating, page }));
   }
 
   // --- diretores ---
@@ -593,14 +717,14 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return page;
   }
 
-  async function directors(url) {
+  async function directors(url, { user }) {
     const term = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
     if (url.searchParams.has('q') && term && term.length < 2) throw v.badRequest('Busca precisa de pelo menos 2 caracteres');
-    return json(200, await catalog.directors({ term, page: pageParam(url) }));
+    return json(200, await viewOf(user).directors({ term, page: pageParam(url) }));
   }
 
-  async function director(id, url) {
-    const result = await catalog.director(id, pageParam(url));
+  async function director(id, url, { user }) {
+    const result = await viewOf(user).director(id, pageParam(url));
     if (!result) throw new HttpError(410, 'Diretor não encontrado no catálogo', 'not_found');
     return json(200, result);
   }
@@ -608,7 +732,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
   // --- gêneros favoritos ---
 
   function preferences(user) {
-    return json(200, { ...profile(user), options: catalog.genres() });
+    return json(200, { ...profile(user), options: catalog.genres(), ratingOptions: v.RATING_OPTIONS });
   }
 
   async function savePreferences(req, { id: uid }) {
@@ -631,9 +755,8 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
   // com filme e série e sem o que o usuário já abriu.
   async function recommendations({ id: uid, user }) {
     const genres = pickedGenres(user);
-    const entry = await stores.library.get(uid);
-    const items = Object.values(entry?.value.items ?? {});
-    const exclude = new Set(Object.keys(entry?.value.items ?? {}));
+    const { view, record, items } = await visibleLibrary(user, uid);
+    const exclude = new Set(Object.keys(record?.items ?? {}));
     const when = (item) => item.doneAt ?? item.lastViewedAt;
     const watched = items.filter((item) => item.done).sort((a, b) => when(b).localeCompare(when(a)));
     const rows = [];
@@ -643,11 +766,11 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       rows.push({
         id: 'because',
         title: watched[0] ? `Porque você assistiu ${anchor.title}` : `Parecidos com ${anchor.title}`,
-        items: catalog.similar(anchor.type, anchor.id, { exclude }),
+        items: view.similar(anchor.type, anchor.id, { exclude }),
       });
     }
     if (genres) {
-      const { first, second, both } = catalog.recommend(
+      const { first, second, both } = view.recommend(
         genres.map((genre) => genre.id),
         exclude,
         undefined,
@@ -660,6 +783,144 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       );
     }
     return json(200, { rows: rows.filter((row) => row.items?.length) });
+  }
+
+  // --- "não sei o que ver" ---
+
+  // Sorteia um título que a pessoa ainda não abriu. "Quero ver" NÃO é excluído: é um ótimo candidato. `skip` carrega o que
+  // o front já mostrou nesta rodada (o servidor não guarda estado do sorteio: o resultado depende só dos parâmetros).
+  async function surprise(url, { id: uid, user }) {
+    const params = url.searchParams;
+    const type = params.get('type') ?? 'all';
+    if (!['all', 'movie', 'tv'].includes(type)) throw v.badRequest();
+    const maxMinutes = params.has('max') ? v.intParam(params.get('max'), 30, 600) : null;
+    if (params.has('max') && maxMinutes === null) throw v.badRequest();
+
+    const skipText = params.get('skip') ?? '';
+    const skipList = skipText ? skipText.split(',') : [];
+    if (skipList.length > SKIP_CAP || !skipList.every((entry) => SKIP_ENTRY_RE.test(entry))) throw v.badRequest();
+
+    const view = viewOf(user);
+    const record = (await stores.library.get(uid))?.value;
+    const genres = pickedGenres(user);
+    const item = view.pick({
+      genreIds: genres ? genres.map((genre) => genre.id) : null,
+      exclude: new Set(Object.keys(record?.items ?? {})),
+      skip: new Set(skipList),
+      maxMinutes,
+      type,
+      random,
+    });
+    return json(200, { item, inWatchlist: Boolean(item && record?.watchlist?.[`${item.type}:${item.id}`]) });
+  }
+
+  // --- pedido de título ---
+
+  // A chave identifica o pedido: tipo + título normalizado (mesma regra do catálogo). O id público é derivado dela, então
+  // o mesmo pedido tem sempre o mesmo id e cancelar não precisa de outro índice.
+  const requestKey = (type, title) => `${type}:${normalizeTitle(title)}`;
+  const requestId = (key) => sha256Hex(key).slice(0, 16);
+
+  const publicRequestBase = ({ id, title, type, year, note, createdAt }) => ({ id, title, type, year, note, createdAt });
+
+  // `inCatalog` é calculado na leitura: quando o título entra no catálogo o pedido "se atende sozinho", sem job nem regravação.
+  const publicRequest = (view, item) => ({ ...publicRequestBase(item), inCatalog: view.hasTitle(item.title, { type: item.type, year: item.year }) });
+
+  // Aviso ao admin: melhor esforço e com teto diário. O pedido já está gravado; falha ou teto estourado só vão para o log.
+  async function notifyRequest(user, item) {
+    try {
+      const day = nowIso().slice(0, 10);
+      if ((await increment(stores.limits, `request-mails:${day}`, DAY_MS, now())) > DAILY_REQUEST_MAILS) {
+        console.error('mail_error', 'daily_cap');
+        return;
+      }
+      await mailer.sendTitleRequest({ name: user.name, email: user.email, title: item.title, type: item.type, year: item.year, note: item.note });
+    } catch (err) {
+      console.error('mail_error', err?.message);
+    }
+  }
+
+  async function createRequest(req, { id: uid, user }) {
+    const body = await readJson(req);
+    const title = v.cleanRequestTitle(body.title);
+    const type = v.requestType(body.type);
+    const year = body.year == null ? null : v.intInRange(body.year, 1800, 2100);
+    const note = v.cleanNote(body.note);
+    // Título só de pontuação ("!!") passa no tamanho mas normaliza para vazio: não identificaria nada.
+    if (!title || !normalizeTitle(title) || type === null || (body.year != null && year === null) || note === false) throw v.badRequest();
+    const key = requestKey(type, title);
+
+    // 1) O catálogo já tem: não vira pedido, o front leva a pessoa até o título.
+    const found = viewOf(user).hasTitle(title, { type, year });
+    if (found) throw new HttpError(409, 'Esse título já está no catálogo', 'already_in_catalog', { item: found });
+
+    // 2) Pedido igual: responde com o que já existe, sem gastar limite nem e-mail (repetir é inofensivo).
+    const existing = (await stores.requests.get(uid))?.value.items?.[key];
+    if (existing) return json(200, { item: publicRequestBase(existing), duplicate: true });
+
+    // 3) Só pedido novo conta no limite diário.
+    await guard('req-user', uid, REQUESTS_PER_USER);
+
+    const item = { id: requestId(key), title, type, year, note, createdAt: nowIso() };
+    const result = await updateRequests(uid, (record) => {
+      if (record.items[key]) return { unchanged: true, item: record.items[key] }; // duas abas ao mesmo tempo: vale a primeira
+      record.items[key] = item;
+      return { item };
+    });
+    if (result.unchanged) return json(200, { item: publicRequestBase(result.item), duplicate: true });
+
+    await notifyRequest(user, item);
+    return json(201, { item: publicRequestBase(item) });
+  }
+
+  async function listRequests({ id: uid, user }) {
+    const view = viewOf(user);
+    const items = Object.values((await stores.requests.get(uid))?.value.items ?? {}).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return json(200, { items: items.map((item) => publicRequest(view, item)) });
+  }
+
+  async function cancelRequest(req, { id: uid }) {
+    const body = await readJson(req);
+    if (typeof body.id !== 'string' || !REQUEST_ID_RE.test(body.id)) throw v.badRequest();
+    await updateRequests(uid, (record) => {
+      const key = Object.keys(record.items).find((k) => record.items[k].id === body.id);
+      if (!key) throw new HttpError(404, 'Pedido não encontrado', 'not_found');
+      delete record.items[key];
+    });
+    return json(200, { ok: true });
+  }
+
+  // --- modo família ---
+
+  // Por que a senha para afrouxar: o modo existe para uma criança usar o aparelho já logado. Deixar a própria criança desligar
+  // (ou subir o limite) acabaria com o propósito, então só quem sabe a senha da conta afrouxa. Apertar (ou ligar pela 1ª vez)
+  // não pede senha: não abre nada. As tentativas de senha usam o MESMO limitador da troca de senha (`pwfail:`): contam antes
+  // de verificar e zeram no sucesso. Senha errada é 400 e não 401: 401 derrubaria a sessão no front.
+  async function setRatingLimit(req, { id: uid, user: sessionUser }) {
+    const body = await readJson(req);
+    const max = body.max;
+    if (max !== null && !v.RATING_OPTIONS.includes(max)) throw v.badRequest('Escolha um limite da lista ou desligue o modo');
+    const loosens = (current) => current !== null && (max === null || max > current);
+
+    const password = body.password;
+    const failKey = `pwfail:${uid}`;
+    let counted = false;
+    if (loosens(ratingOf(sessionUser))) {
+      if (typeof password !== 'string' || !password || password.length > v.PASSWORD_MAX) {
+        throw new HttpError(400, 'Informe a senha da conta para afrouxar o modo família', 'password_required');
+      }
+      if ((await increment(stores.limits, failKey, PASSWORD_FAILS_PER_USER.windowMs, now())) > PASSWORD_FAILS_PER_USER.limit) throw tooMany();
+      counted = true;
+    }
+    const user = await updateUser(uid, async (current) => {
+      // Reavalia com o registro lido agora: o limite pode ter mudado entre a autenticação e a gravação.
+      if (loosens(ratingOf(current)) && !(typeof password === 'string' && (await verifyPassword(password, current.passHash)))) {
+        throw new HttpError(400, 'Senha da conta incorreta', 'wrong_password');
+      }
+      return { ...current, maxRating: max };
+    });
+    if (counted) await clear(stores.limits, failKey);
+    return json(200, { ...profile(user), ratingOptions: v.RATING_OPTIONS });
   }
 
   // --- conta ---
@@ -712,7 +973,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
 
   // Só type/id/season/episode entram: o link do player é sempre montado aqui, e o histórico não é tocado
   // (o celular já registrou o título ao abrir o filme).
-  async function tvSend(req, { id: uid }) {
+  async function tvSend(req, { id: uid, user }) {
     const body = await readJson(req);
     const type = v.validType(body.type);
     const mediaId = v.validId(body.id);
@@ -720,7 +981,9 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     const episode = body.episode == null ? 1 : v.intInRange(body.episode, 1, 999);
     if (!type || !mediaId || season === null || episode === null) throw v.badRequest();
 
-    const title = catalog.lookup(type, mediaId)?.title ?? null;
+    const view = viewOf(user);
+    requireVisible(user, view, type, mediaId);
+    const title = view.lookup(type, mediaId)?.title ?? null;
     const play = { url: embedUrl(type, mediaId, season, episode), title, season: type === 'tv' ? season : null, episode: type === 'tv' ? episode : null };
     await tv.send(uid, { code: normalizeCode(body.code), play });
     return json(200, { ok: true, title });
@@ -742,6 +1005,11 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     ['GET', /^\/api\/me\/preferences$/, async (_req, _url, _m, session) => preferences(session.user)],
     ['POST', /^\/api\/me\/preferences$/, (req, _url, _m, session) => savePreferences(req, session)],
     ['GET', /^\/api\/me\/recommendations$/, (_req, _url, _m, session) => recommendations(session)],
+    ['GET', /^\/api\/me\/surprise$/, (_req, url, _m, session) => surprise(url, session)],
+    ['GET', /^\/api\/me\/requests$/, (_req, _url, _m, session) => listRequests(session)],
+    ['POST', /^\/api\/me\/requests$/, (req, _url, _m, session) => createRequest(req, session)],
+    ['POST', /^\/api\/me\/requests\/cancel$/, (req, _url, _m, session) => cancelRequest(req, session)],
+    ['POST', /^\/api\/me\/rating-limit$/, (req, _url, _m, session) => setRatingLimit(req, session)],
     ['GET', /^\/api\/me\/account$/, (_req, _url, _m, session) => account(session)],
     ['POST', /^\/api\/me\/account$/, (req, _url, _m, session) => renameAccount(req, session)],
     ['POST', /^\/api\/me\/password$/, (req, _url, _m, session) => changePassword(req, session)],
@@ -750,32 +1018,44 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     [
       'GET',
       /^\/api\/list\/([a-z0-9-]{1,30})$/,
-      async (_req, url, m) => {
+      async (_req, url, m, session) => {
         const page = url.searchParams.has('page') ? Number(url.searchParams.get('page')) : 1;
         if (!v.intInRange(page, 1, 2000)) throw v.badRequest();
-        return json(200, await catalog.list(m[1], page));
+        return json(200, await viewOf(session.user).list(m[1], page));
       },
     ],
-    ['GET', /^\/api\/directors$/, (_req, url) => directors(url)],
-    ['GET', /^\/api\/director\/(\d{1,9})$/, (_req, url, m) => director(m[1], url)],
-    ['GET', /^\/api\/browse$/, (_req, url) => browse(url)],
-    ['GET', /^\/api\/browse\/options$/, async () => json(200, catalog.browseGenres())],
+    ['GET', /^\/api\/directors$/, (_req, url, _m, session) => directors(url, session)],
+    ['GET', /^\/api\/director\/(\d{1,9})$/, (_req, url, m, session) => director(m[1], url, session)],
+    ['GET', /^\/api\/browse$/, (_req, url, _m, session) => browse(url, session)],
+    ['GET', /^\/api\/browse\/options$/, async (_req, _url, _m, session) => json(200, viewOf(session.user).browseGenres())],
     ['GET', /^\/api\/title\/(movie|tv)\/(\d{1,9})$/, (_req, _url, m, session) => title(m[1], m[2], session)],
     [
       'GET',
       /^\/api\/search$/,
-      async (_req, url) => {
+      async (_req, url, _m, session) => {
         const term = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
         if (term.length < 2) throw v.badRequest('Busca precisa de pelo menos 2 caracteres');
         const { type, from, to } = readFilters(url);
-        return json(200, await catalog.search(term, { type: type === 'all' ? null : type, from, to }));
+        return json(200, await viewOf(session.user).search(term, { type: type === 'all' ? null : type, from, to }));
       },
     ],
-    ['GET', /^\/api\/seasons\/(\d{1,9})$/, async (_req, _url, m) => json(200, await catalog.seasons(m[1]))],
+    [
+      'GET',
+      /^\/api\/seasons\/(\d{1,9})$/,
+      async (_req, _url, m, { user }) => {
+        const view = viewOf(user);
+        requireVisible(user, view, 'tv', m[1]);
+        return json(200, await view.seasons(m[1]));
+      },
+    ],
     [
       'GET',
       /^\/api\/episodes\/(\d{1,9})\/(\d{1,2})$/,
-      async (_req, _url, m) => json(200, await catalog.episodes(m[1], Number(m[2]))),
+      async (_req, _url, m, { user }) => {
+        const view = viewOf(user);
+        requireVisible(user, view, 'tv', m[1]);
+        return json(200, await view.episodes(m[1], Number(m[2])));
+      },
     ],
     ['POST', /^\/api\/play$/, (req, _url, _m, session) => play(req, session)],
     ['POST', /^\/api\/tv\/send$/, (req, _url, _m, session) => tvSend(req, session)],
@@ -819,7 +1099,7 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
       if (knownPath || PUBLIC.some(([, route]) => route === path)) throw new HttpError(405, 'Método não permitido', 'method_not_allowed');
       throw new HttpError(404, 'Rota inexistente', 'not_found');
     } catch (err) {
-      if (err instanceof HttpError) return json(err.status, { error: err.message, code: err.code });
+      if (err instanceof HttpError) return json(err.status, { error: err.message, code: err.code, ...err.details });
       console.error('api_error', err?.name, err?.message);
       return json(500, { error: 'Erro interno', code: 'internal' });
     }
