@@ -91,6 +91,14 @@ export function fakeCatalog({ withGenres = true } = {}) {
       const list = [{ id: 28, name: 'Ação' }];
       return { all: list, movie: list, tv: [{ id: 10759, name: 'Action & Adventure' }] };
     },
+    async directors(options) {
+      calls.push(['directors', options]);
+      return { page: options.page, totalPages: 1, total: 0, items: [] };
+    },
+    async director(id, page) {
+      calls.push(['director', id, page]);
+      return id === '9001' ? { director: { id, name: 'Diretora Teste', photo: null, count: 1 }, page, totalPages: 1, items: [] } : null;
+    },
     nextEpisode(id, season, episode) {
       if (id !== '300') return null;
       if (season === 1 && episode === 1) return { season: 1, episode: 2 };

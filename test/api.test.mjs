@@ -18,6 +18,8 @@ const PROTECTED = [
   ['GET', '/api/title/movie/777'],
   ['GET', '/api/browse?type=movie'],
   ['GET', '/api/browse/options'],
+  ['GET', '/api/directors'],
+  ['GET', '/api/director/9001'],
   ['GET', '/api/me/account'],
   ['POST', '/api/me/account', { name: 'Ana Souza' }],
   ['POST', '/api/me/watchlist', { type: 'movie', id: '777', add: true }],

@@ -31,6 +31,13 @@
  *   um catálogo inteiro. "Novidades da semana" usa o campo `a` (data em que o título entrou no catálogo, gravado pelo
  *   script só para id novo) contado a partir de `generatedAt`, e não do relógio: a janela fica determinista e a
  *   fileira não esvazia só porque o site ficou dias sem receber uma foto nova. Foto sem nenhum `a` = fileira vazia.
+ * - Diretores (campo `dr` dos filmes + `directors` no topo da foto): a lista (`directors`) mostra só quem tem foto e pelo
+ *   menos DIRECTOR_MIN_MOVIES filmes no catálogo, dos mais conhecidos (soma dos votos dos filmes) para os menos, com busca
+ *   pelo nome (mesma regra da busca de títulos: cada palavra é começo de uma palavra do nome). A página do diretor
+ *   (`director`) vale para qualquer um com ao menos 1 filme (o link da tela de detalhe pode apontar para quem não entra
+ *   na lista). Os filmes saem do melhor avaliado para o pior, mas em 3 faixas: nota com votos suficientes
+ *   (RATING_FILTER_MIN_VOTES, a mesma régua do filtro de nota), depois nota com poucos votos e por último sem nota.
+ *   Ordenar só pela nota poria um filme com 3 votos e nota 9 acima de um clássico de 8,5 com milhares de votos.
  * - `nextEpisode` decide o "próximo episódio" no servidor com a mesma contagem do TMDB, para o front não precisar
  *   mandar a lista de episódios.
  */
@@ -55,6 +62,8 @@ const SIMILAR_LIMIT = 20;
 const SIMILAR_MIN_VOTES = 100;
 const RATING_FILTER_MIN_VOTES = 50; // nota alta com 3 votos não é nota: o filtro "nota mínima" ignora título com poucos votos
 const NEW_WINDOW_DAYS = 7;
+const DIRECTOR_MIN_MOVIES = 3;
+const DIRECTOR_NAME_MAX = 100;
 const SHORT_SHOW_MAX_EPISODES = 12;
 const SHORT_SHOW_MIN_VOTES = 300;
 const SHORT_MOVIE_MIN_MINUTES = 60; // abaixo disso é curta-metragem, não "filme curto"
@@ -135,6 +144,12 @@ function toItem(type, entry) {
   };
 }
 
+// Faixa de confiança da nota: 0 = nota com votos suficientes, 1 = nota com poucos votos, 2 = sem nota.
+const ratingTier = (entry) => (entry.r == null ? 2 : (entry.n ?? 0) >= RATING_FILTER_MIN_VOTES ? 0 : 1);
+
+// Do melhor avaliado para o pior; empate pela quantidade de votos e, por fim, pelo ano (mais novo primeiro).
+const byBestRated = (a, b) => ratingTier(a) - ratingTier(b) || (b.r ?? 0) - (a.r ?? 0) || (b.n ?? 0) - (a.n ?? 0) || (yearOf(b) || 0) - (yearOf(a) || 0);
+
 const asRows = (type, entries) => entries.map((entry) => ({ type, entry }));
 
 // Filtros de ano e de nota, iguais na busca e no explorar. Sem ano no título = fora quando há filtro de ano.
@@ -170,6 +185,29 @@ export function createCatalog({ data, now = Date.now }) {
   const genreOptions = optionsFor(data?.genres, movies);
   const tvGenreOptions = optionsFor(data?.tvGenres, series);
   const genreNames = { movie: data?.genres ?? {}, tv: data?.tvGenres ?? {} };
+
+  // Diretores: id da pessoa -> filmes do catálogo que ela dirigiu (já do melhor avaliado para o pior).
+  const directorData = data?.directors ?? {};
+  const filmsByDirector = new Map();
+  for (const entry of movies) {
+    for (const personId of entry.dr ?? []) {
+      if (!filmsByDirector.has(String(personId))) filmsByDirector.set(String(personId), []);
+      filmsByDirector.get(String(personId)).push(entry);
+    }
+  }
+  for (const films of filmsByDirector.values()) films.sort(byBestRated);
+  const directorOf = (id) => {
+    const person = Object.hasOwn(directorData, id) ? directorData[id] : null;
+    const films = filmsByDirector.get(id);
+    if (!person || !films) return null;
+    return { id, name: String(person.n), photo: person.p ?? null, count: films.length };
+  };
+  const directorIndex = [...filmsByDirector.keys()]
+    .map(directorOf)
+    .filter((director) => director && director.photo && director.count >= DIRECTOR_MIN_MOVIES)
+    .map((director) => ({ ...director, fame: filmsByDirector.get(director.id).reduce((sum, entry) => sum + (entry.n ?? 0), 0), words: normalize(director.name).split(' ') }))
+    .sort((a, b) => b.fame - a.fame || a.name.localeCompare(b.name, 'pt-BR'));
+  const publicDirector = ({ id, name, photo, count }) => ({ id, name, photo, count });
 
   // "Novidades": título cujo `a` cai nos NEW_WINDOW_DAYS dias que terminam na data da foto.
   const snapshotTime = Date.parse(data?.generatedAt);
@@ -327,7 +365,32 @@ export function createCatalog({ data, now = Date.now }) {
     detail(type, id) {
       const entry = entryOf(type, id);
       if (!entry) return null;
-      return { ...toItem(type, entry), ...info(type, id), similar: similar(type, id) };
+      const directors = type === 'movie' ? (entry.dr ?? []).map((personId) => directorOf(String(personId))).filter(Boolean).map(publicDirector) : [];
+      return { ...toItem(type, entry), ...info(type, id), directors, similar: similar(type, id) };
+    },
+
+    // Lista de diretores para escolher (quem tem foto e filmes suficientes), dos mais conhecidos; `term` filtra pelo nome.
+    async directors({ term = '', page = 1 } = {}) {
+      requireData();
+      const words = normalize(String(term).slice(0, DIRECTOR_NAME_MAX)).split(' ').filter(Boolean);
+      const rows = words.length ? directorIndex.filter((director) => words.every((word) => director.words.some((w) => w.startsWith(word)))) : directorIndex;
+      const start = (page - 1) * PAGE_SIZE;
+      return { page, totalPages: Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), total: rows.length, items: rows.slice(start, start + PAGE_SIZE).map(publicDirector) };
+    },
+
+    // Filmes de um diretor, do melhor avaliado para o pior. Diretor fora do catálogo = null.
+    async director(id, page = 1) {
+      requireData();
+      const person = directorOf(id);
+      if (!person) return null;
+      const films = filmsByDirector.get(id);
+      const start = (page - 1) * PAGE_SIZE;
+      return {
+        director: publicDirector(person),
+        page,
+        totalPages: Math.max(1, Math.ceil(films.length / PAGE_SIZE)),
+        items: films.slice(start, start + PAGE_SIZE).map((entry) => toItem('movie', entry)),
+      };
     },
 
     info,

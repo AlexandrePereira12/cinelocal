@@ -61,6 +61,9 @@
  *   contagem de cada temporada); no último episódio da última temporada, a série inteira vira "assistida". Sem
  *   temporada/episódio no pedido (ou em filme) o comportamento é o de sempre: marca/desmarca o título todo.
  * - Sinopse e nota vão só no `info` da resposta de /play, nunca em `publicItem`: o histórico/lista não carrega texto longo.
+ * - Diretores (`/api/directors` e `/api/director/<id>`): a ordenação e as regras ficam no catálogo; aqui só se validam
+ *   os parâmetros. Busca com 1 caractere é erro (como na busca de títulos), vazia é "sem filtro". Diretor desconhecido
+ *   responde 410 como título fora do catálogo.
  * - Rotas novas respondem 410 (não 404) para "título fora do catálogo": o `netlify dev` reenvia 404 para outro caminho.
  */
 
@@ -582,6 +585,26 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
     return json(200, await catalog.browse({ type, genre, from, to, minRating, page }));
   }
 
+  // --- diretores ---
+
+  function pageParam(url) {
+    const page = url.searchParams.has('page') ? Number(url.searchParams.get('page')) : 1;
+    if (!v.intInRange(page, 1, 2000)) throw v.badRequest();
+    return page;
+  }
+
+  async function directors(url) {
+    const term = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+    if (url.searchParams.has('q') && term && term.length < 2) throw v.badRequest('Busca precisa de pelo menos 2 caracteres');
+    return json(200, await catalog.directors({ term, page: pageParam(url) }));
+  }
+
+  async function director(id, url) {
+    const result = await catalog.director(id, pageParam(url));
+    if (!result) throw new HttpError(410, 'Diretor não encontrado no catálogo', 'not_found');
+    return json(200, result);
+  }
+
   // --- gêneros favoritos ---
 
   function preferences(user) {
@@ -733,6 +756,8 @@ export function createHandler({ stores, catalog, mailer, acceptsMail, env, now =
         return json(200, await catalog.list(m[1], page));
       },
     ],
+    ['GET', /^\/api\/directors$/, (_req, url) => directors(url)],
+    ['GET', /^\/api\/director\/(\d{1,9})$/, (_req, url, m) => director(m[1], url)],
     ['GET', /^\/api\/browse$/, (_req, url) => browse(url)],
     ['GET', /^\/api\/browse\/options$/, async () => json(200, catalog.browseGenres())],
     ['GET', /^\/api\/title\/(movie|tv)\/(\d{1,9})$/, (_req, _url, m, session) => title(m[1], m[2], session)],

@@ -18,8 +18,14 @@
  * - Formato: um item por linha (diff do git legível), campos nulos omitidos, sinopse cortada em 240 caracteres.
  *   Chaves curtas: i id · t título · ot título original · y ano · d data · p pôster · b backdrop · r nota ·
  *   n votos · v popularidade · o sinopse · rt duração (filme) · g ids de gênero (filme e série, cada um no seu
- *   conjunto de ids) · s temporadas [[número, episódios], ...] (série) · a data em que o título entrou no catálogo.
- *   Topo do arquivo: `genres` (filme) e `tvGenres` (série) = { idDoGênero: "nome em pt-BR" }.
+ *   conjunto de ids) · dr ids dos diretores (filme) · s temporadas [[número, episódios], ...] (série) · a data em que
+ *   o título entrou no catálogo.
+ *   Topo do arquivo: `genres` (filme) e `tvGenres` (série) = { idDoGênero: "nome em pt-BR" } e `directors` =
+ *   { idDaPessoa: { n: nome, p: foto } }, só de quem dirigiu algum filme que ficou na foto.
+ * - Diretores: vêm da MESMA chamada do filme (`append_to_response=credits`), então não custam nenhuma requisição a
+ *   mais. Diretor = quem tem `job: "Director"` na equipe (até MAX_DIRECTORS por filme: codireção conta para os dois;
+ *   passar disso é lista de unidade/segunda equipe). Séries não têm diretor único, ficam de fora. Um gate barra a foto
+ *   em que quase nenhum filme trouxe diretor (mudança de formato do TMDB): sem ele o site perderia a seção em silêncio.
  * - `a` (alimenta a fileira "Novidades da semana"): só id que NÃO estava na foto anterior ganha `a` = data da coleta; quem
  *   já estava mantém o `a` que tinha, e `a` com mais de A_KEEP_DAYS dias é descartado (a fileira só olha a última semana,
  *   guardar para sempre só incharia o arquivo). Se a foto anterior está vazia ou não existe, NADA ganha `a`: senão a
@@ -47,11 +53,13 @@ const TMDB_TIMEOUT_MS = 20_000;
 const MAX_ATTEMPTS = 4;
 const OVERVIEW_MAX = 240;
 const A_KEEP_DAYS = 30;
+const MAX_DIRECTORS = 3;
 
 export const GATES = {
   maxFailedRatio: 0.02,
   maxNotFoundRatio: 0.1,
   minVsPreviousRatio: 0.9,
+  minDirectedRatio: 0.5, // no TMDB real passa de 90% dos filmes
 };
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -140,9 +148,22 @@ function genreIds(d) {
   return ids.length ? ids : undefined;
 }
 
+// Pessoas com `job: "Director"` na equipe do filme, sem repetir, no máximo MAX_DIRECTORS. Nome ou id inválido é ignorado.
+export function directorsOf(d) {
+  const found = new Map();
+  for (const person of Array.isArray(d?.credits?.crew) ? d.credits.crew : []) {
+    if (person?.job !== 'Director' || !Number.isInteger(person.id) || person.id <= 0) continue;
+    const name = typeof person.name === 'string' ? person.name.trim() : '';
+    if (name && !found.has(person.id)) found.set(person.id, { n: name, p: asPath(person.profile_path) });
+    if (found.size === MAX_DIRECTORS) break;
+  }
+  return found;
+}
+
 export function compactMovie(d) {
   if (!d || d.adult === true || !d.title) return null;
-  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined, g: genreIds(d) };
+  const directors = [...directorsOf(d).keys()];
+  return { ...common(d, d.title, d.original_title, d.release_date), rt: d.runtime > 0 ? d.runtime : undefined, g: genreIds(d), dr: directors.length ? directors : undefined };
 }
 
 export function compactSeries(d, today) {
@@ -178,7 +199,7 @@ function createPacer(minIntervalMs, sleep) {
 export async function collect({ ids, token, fetchImpl = fetch, today, concurrency = 10, minIntervalMs = 30, sleep = defaultSleep, onProgress }) {
   const pace = createPacer(minIntervalMs, sleep);
   const jobs = [...ids.movies.map((id) => ['movie', id]), ...ids.series.map((id) => ['tv', id])];
-  const result = { movies: [], series: [], genres: {}, tvGenres: {}, stats: { total: jobs.length, ok: 0, notFound: 0, failed: 0, discarded: 0 } };
+  const result = { movies: [], series: [], genres: {}, tvGenres: {}, directors: {}, stats: { total: jobs.length, ok: 0, notFound: 0, failed: 0, discarded: 0 } };
   let cursor = 0;
   let done = 0;
 
@@ -187,7 +208,7 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
       const [kind, id] = jobs[cursor++];
       try {
         await pace();
-        const reply = await requestJson(`${TMDB}/${kind}/${id}?language=pt-BR`, {
+        const reply = await requestJson(`${TMDB}/${kind}/${id}?language=pt-BR${kind === 'movie' ? '&append_to_response=credits' : ''}`, {
           fetchImpl,
           sleep,
           timeoutMs: TMDB_TIMEOUT_MS,
@@ -202,6 +223,9 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
           else {
             (kind === 'movie' ? result.movies : result.series).push(entry);
             result.stats.ok++;
+            if (kind === 'movie') {
+              for (const [personId, person] of directorsOf(reply.data)) result.directors[personId] = person.p ? person : { n: person.n };
+            }
             // Nomes dos gêneros (já em pt-BR) vêm das próprias respostas. Filme e série usam ids de gênero diferentes no TMDB.
             const names = kind === 'movie' ? result.genres : result.tvGenres;
             for (const g of reply.data.genres ?? []) {
@@ -222,6 +246,8 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
   await Promise.all(Array.from({ length: concurrency }, worker));
   result.movies.sort((a, b) => a.i - b.i);
   result.series.sort((a, b) => a.i - b.i);
+  // Ordem estável (id crescente): o arquivo só muda no diff quando algo mudou de verdade.
+  result.directors = Object.fromEntries(Object.entries(result.directors).sort(([a], [b]) => a - b));
   return result;
 }
 
@@ -229,10 +255,13 @@ export async function collect({ ids, token, fetchImpl = fetch, today, concurrenc
 
 export const MIN_GENRES = 10; // o TMDB tem cerca de 19 gêneros de filme
 
-export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES }) {
+export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES, movies = 0, directed = movies }) {
   const problems = [];
   if (kept === 0) problems.push('nenhum título coletado');
   if (kept > 0 && genreCount < MIN_GENRES) problems.push(`o TMDB devolveu só ${genreCount} gêneros (esperado ao menos ${MIN_GENRES}); a seleção de gêneros ficaria quebrada`);
+  if (movies > 0 && directed / movies < GATES.minDirectedRatio) {
+    problems.push(`só ${directed} de ${movies} filmes trouxeram diretor (mínimo ${GATES.minDirectedRatio * 100}%); a seção de diretores ficaria quase vazia`);
+  }
   if (stats.total > 0 && stats.failed / stats.total > GATES.maxFailedRatio) {
     problems.push(`falhas de rede/TMDB demais: ${stats.failed} de ${stats.total} (teto ${GATES.maxFailedRatio * 100}%)`);
   }
@@ -245,14 +274,18 @@ export function checkGates({ stats, kept, previousTotal, genreCount = MIN_GENRES
   return problems;
 }
 
-export function serialize({ generatedAt, genres = {}, tvGenres = {}, movies, series }) {
+export function serialize({ generatedAt, genres = {}, tvGenres = {}, directors = {}, movies, series }) {
   const lines = (items) => items.map((item) => `    ${JSON.stringify(item)}`).join(',\n');
+  const people = Object.entries(directors).map(([id, person]) => `    "${id}": ${JSON.stringify(person)}`);
   return [
     '// Gerado por scripts/atualizar-catalogo.mjs (npm run atualizar-catalogo). Não edite à mão.',
     'export default {',
     `  generatedAt: ${JSON.stringify(generatedAt)},`,
     `  genres: ${JSON.stringify(genres)},`,
     `  tvGenres: ${JSON.stringify(tvGenres)},`,
+    '  directors: {',
+    people.join(',\n'),
+    '  },',
     '  movies: [',
     lines(movies),
     '  ],',
@@ -331,7 +364,8 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
 
   const genreCount = Object.keys(collected.genres).length;
   const previous = await loadPrevious(file);
-  const problems = checkGates({ stats, kept, previousTotal: previous.total, genreCount });
+  const directed = collected.movies.filter((movie) => movie.dr).length;
+  const problems = checkGates({ stats, kept, previousTotal: previous.total, genreCount, movies: collected.movies.length, directed });
   if (problems.length) {
     const error = new Error(`snapshot rejeitado, o catálogo atual foi mantido:\n  - ${problems.join('\n  - ')}`);
     error.stats = stats;
@@ -340,11 +374,12 @@ export async function refreshCatalog({ token, fetchImpl = fetch, file = OUTPUT_F
 
   const novos = annotateNew(collected, previous, today);
   log('3/3 gravando…');
-  writeAtomic(file, serialize({ generatedAt: new Date().toISOString(), genres: collected.genres, tvGenres: collected.tvGenres, movies: collected.movies, series: collected.series }));
+  writeAtomic(file, serialize({ generatedAt: new Date().toISOString(), genres: collected.genres, tvGenres: collected.tvGenres, directors: collected.directors, movies: collected.movies, series: collected.series }));
   const summary = {
     filmes: collected.movies.length,
     series: collected.series.length,
     generos: genreCount,
+    diretores: Object.keys(collected.directors).length,
     novos,
     inexistentesNoTmdb: stats.notFound,
     falhas: stats.failed,

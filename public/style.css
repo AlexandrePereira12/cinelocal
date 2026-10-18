@@ -364,6 +364,28 @@ body:has(.modal[open]) { overflow: hidden; }
 .forgot-link:hover { color: var(--text); }
 a.user-name:hover { color: var(--text); text-decoration: underline; }
 
+/* Diretores: grade de rostos redondos, cabeçalho da página do diretor e link na tela do filme */
+.director-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 22px 14px; }
+.director-card { display: block; text-align: center; }
+.row-scroll .director-card { flex: 0 0 130px; scroll-snap-align: start; }
+.director-face { display: block; width: 100%; max-width: 130px; aspect-ratio: 1; margin: 0 auto; border-radius: 50%; object-fit: cover; object-position: center top; background: var(--surface); transition: transform .15s, box-shadow .15s; }
+.director-face.fallback { display: grid; place-items: center; color: var(--muted); font-size: 32px; font-weight: 700; background: var(--surface-2); }
+.director-card:hover .director-face, .director-card:focus-visible .director-face { transform: translateY(-4px); box-shadow: 0 10px 28px #000c; }
+.director-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius); }
+.director-name { margin: 10px 2px 0; font-size: 14px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.director-count { margin: 0 2px; color: var(--muted); font-size: 13px; }
+.sk-director { aspect-ratio: 1; max-width: 130px; margin: 0 auto; width: 100%; border-radius: 50%; }
+.director-head { display: flex; align-items: center; gap: 24px; margin: 0 0 28px; }
+.director-head h1 { margin: 0 0 4px; }
+.director-face.big { width: 140px; max-width: 140px; margin: 0; flex: none; font-size: 44px; }
+.director-sub { margin: 0; color: #d6d6e0; }
+.director-note { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.detail-directors { margin: 0 0 12px; color: #d6d6e0; }
+.detail-directors a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.detail-directors a:hover { color: var(--accent-hover); }
+.filters input[type="search"] { min-width: 220px; padding: 8px 12px; background: var(--surface); border: 1px solid #ffffff1a; border-radius: 8px; outline: none; }
+.filters input[type="search"]:focus { border-color: var(--accent); }
+
 /* Celular: cabeçalho em 3 linhas (marca+usuário, busca, menu), player de borda a borda, alvos de toque de 44px */
 @media (max-width: 760px) {
   html { -webkit-text-size-adjust: 100%; }
@@ -400,6 +422,10 @@ a.user-name:hover { color: var(--text); text-decoration: underline; }
   .row-scroll { margin: 0 -16px; padding: 0 16px 12px; scroll-padding: 0 16px; }
   .row-scroll .card { flex-basis: 130px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 18px 12px; }
+  .director-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 18px 10px; }
+  .director-head { gap: 16px; }
+  .director-face.big { width: 96px; max-width: 96px; font-size: 32px; }
+  .filters input[type="search"] { min-width: 0; width: 100%; }
 
   .hero { min-height: 340px; }
   .hero-body { padding: 28px 16px 44px; }

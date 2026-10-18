@@ -225,12 +225,41 @@ function card(item) {
   );
 }
 
-function row(title, items, href) {
+function row(title, items, href, build = card) {
   return el(
     'section',
     { class: 'row' },
     el('div', { class: 'row-head' }, el('h2', {}, title), href && el('a', { href }, 'Ver tudo')),
-    el('div', { class: 'row-scroll' }, items.map(card)),
+    el('div', { class: 'row-scroll' }, items.map(build)),
+  );
+}
+
+const directorHref = (director) => `#/diretor/${director.id}`;
+
+function initials(name) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0].toUpperCase())
+    .join('');
+}
+
+// Rosto do diretor (foto redonda do TMDB; sem foto, as iniciais).
+function directorFace(director, size, className = 'director-face') {
+  const src = posterUrl(director.photo, size);
+  return src
+    ? el('img', { class: className, src, alt: '', loading: 'lazy', decoding: 'async' })
+    : el('div', { class: `${className} fallback`, 'aria-hidden': 'true' }, initials(director.name));
+}
+
+function directorCard(director) {
+  return el(
+    'a',
+    { class: 'director-card', href: directorHref(director), title: director.name },
+    directorFace(director, 'w185'),
+    el('div', { class: 'director-name' }, director.name),
+    el('div', { class: 'director-count' }, director.count === 1 ? '1 filme' : `${director.count} filmes`),
   );
 }
 
@@ -1061,9 +1090,9 @@ async function renderDecision(token, navId) {
 async function renderHome(token) {
   app.replaceChildren(skeletonHome());
   const favorites = session.genres ?? [];
-  const settled = await Promise.allSettled([api('me/library'), api('me/recommendations'), ...HOME_LISTS.map((name) => api(`list/${name}`))]);
+  const settled = await Promise.allSettled([api('me/library'), api('me/recommendations'), api('directors'), ...HOME_LISTS.map((name) => api(`list/${name}`))]);
   if (token !== navToken) return;
-  const [libraryResult, recommendationsResult, ...results] = settled;
+  const [libraryResult, recommendationsResult, directorsResult, ...results] = settled;
   const listResult = (name) => results[HOME_LISTS.indexOf(name)];
 
   const page = el('div');
@@ -1091,7 +1120,7 @@ async function renderHome(token) {
     }
   }
 
-  // 3. as fileiras de sempre
+  // 3. as fileiras de sempre (a de diretores vem depois delas; sem diretores no catálogo, não aparece)
   let loaded = 0;
   HOME_LISTS.forEach((name, i) => {
     const result = results[i];
@@ -1100,6 +1129,9 @@ async function renderHome(token) {
     page.append(row(LIST_TITLES[name], result.value.items, `#/lista/${name}`));
     loaded++;
   });
+  if (directorsResult.status === 'fulfilled' && directorsResult.value.items.length) {
+    page.append(row('Filmes por diretor', directorsResult.value.items, '#/diretores', directorCard));
+  }
 
   if (!loaded) {
     const firstError = results.find((r) => r.status === 'rejected');
@@ -1113,10 +1145,12 @@ async function renderHome(token) {
 }
 
 // `header` entra entre o título e a grade (filtros); `onData` recebe cada resposta (ex.: total de resultados).
-function renderPagedGrid(title, loadPage, token, { header = null, onData = null } = {}) {
-  const grid = el('div', { class: 'grid', 'aria-busy': 'true' }, Array.from({ length: 18 }, skeletonCard));
+// `build` monta cada item (padrão: card de título) e `gridClass` troca a grade; com `build` próprio os itens não são títulos,
+// então não entram na memória de títulos vistos. `title` null = sem <h1> (a tela já trouxe o dela no `header`).
+function renderPagedGrid(title, loadPage, token, { header = null, onData = null, build = null, gridClass = 'grid', skeleton = skeletonCard } = {}) {
+  const grid = el('div', { class: gridClass, 'aria-busy': 'true' }, Array.from({ length: 18 }, skeleton));
   const more = el('div', { class: 'more' });
-  const page = el('div', { class: 'page' }, el('h1', {}, title), header, grid, more);
+  const page = el('div', { class: 'page' }, title && el('h1', {}, title), header, grid, more);
   app.replaceChildren(page);
 
   let next = 1;
@@ -1135,8 +1169,8 @@ function renderPagedGrid(title, loadPage, token, { header = null, onData = null 
       const data = await loadPage(next);
       if (token !== navToken) return;
       if (next === 1) clearSkeleton(); // tira os esqueletos
-      remember(data.items);
-      grid.append(...data.items.map(card));
+      if (!build) remember(data.items);
+      grid.append(...data.items.map(build ?? card));
       onData?.(data);
       next++;
       const hasMore = data.totalPages != null && next <= data.totalPages;
@@ -1268,6 +1302,83 @@ async function renderExplore(params, token) {
   );
 }
 
+// --- diretores: escolher um diretor e ver os filmes dele, do melhor avaliado para o pior ---
+
+const skeletonDirector = () => el('div', { class: 'skeleton sk-director' });
+
+function renderDirectors(params, token) {
+  const term = (params.get('busca') ?? '').trim().slice(0, 100);
+  const input = el('input', { id: 'director-search', type: 'search', placeholder: 'Buscar diretor', autocomplete: 'off', value: term, 'aria-label': 'Buscar diretor' });
+  const note = el('p', { class: 'filters-note', 'aria-live': 'polite' });
+  const form = el(
+    'form',
+    {
+      class: 'filters',
+      role: 'search',
+      onsubmit: (event) => {
+        event.preventDefault();
+        const next = input.value.trim();
+        if (next.length === 1) return note.replaceChildren('Digite pelo menos 2 letras.'); // a API recusa busca de 1 letra
+        location.hash = hashWithQuery('#/diretores', { busca: next });
+      },
+    },
+    el('div', { class: 'pick' }, el('label', { for: 'director-search' }, 'Diretor'), input),
+    el('button', { class: 'btn', type: 'submit' }, 'Buscar'),
+    term && el('a', { class: 'btn', href: '#/diretores' }, 'Limpar'),
+    note,
+  );
+  renderPagedGrid(
+    'Diretores',
+    (page) => api(`directors?${new URLSearchParams(term.length >= 2 ? { q: term, page } : { page })}`),
+    token,
+    {
+      header: form,
+      build: directorCard,
+      gridClass: 'director-grid',
+      skeleton: skeletonDirector,
+      onData: (data) => (note.textContent = data.total === 1 ? '1 diretor' : `${data.total} diretores`),
+    },
+  );
+}
+
+async function renderDirector(id, token) {
+  const face = el('div', { class: 'director-face big skeleton' });
+  const name = el('h1', {}, '');
+  const count = el('p', { class: 'director-sub' }, 'Carregando…');
+  const head = el('div', { class: 'director-head' }, face, el('div', {}, name, count, el('p', { class: 'director-note' }, 'Do melhor avaliado para o pior.')));
+  let painted = false;
+  let failed = false;
+  renderPagedGrid(
+    null,
+    async (page) => {
+      try {
+        const data = await api(`director/${id}?page=${page}`);
+        if (token === navToken && !painted) {
+          painted = true;
+          document.title = `${data.director.name} — Cine Local`;
+          name.textContent = data.director.name;
+          count.textContent = data.director.count === 1 ? '1 filme no catálogo' : `${data.director.count} filmes no catálogo`;
+          face.replaceWith(directorFace(data.director, 'w185', 'director-face big'));
+        }
+        return data;
+      } catch (err) {
+        if (err.status === 410 && token === navToken && !failed) {
+          failed = true;
+          app.replaceChildren(el('div', { class: 'auth-wrap' }, el('div', { class: 'auth-card' }, el('h1', {}, 'Diretor indisponível'), el('p', { class: 'auth-hint' }, 'Este diretor não está no catálogo.'), el('a', { class: 'btn', href: '#/diretores' }, 'Ver diretores'))));
+        }
+        if (token === navToken && !painted && err.status !== 410) {
+          name.textContent = 'Diretor';
+          count.textContent = 'Não foi possível carregar.';
+          face.classList.remove('skeleton');
+        }
+        throw err;
+      }
+    },
+    token,
+    { header: head },
+  );
+}
+
 // --- detalhe do título: o que o card não cabe (sinopse, gêneros, parecidos) e "Quero ver" ---
 
 async function renderTitle(type, id, token) {
@@ -1341,6 +1452,8 @@ async function renderTitle(type, id, token) {
             data.originalTitle && el('p', { class: 'sub' }, data.originalTitle),
             meta && el('p', { class: 'detail-meta' }, meta),
             data.genres.length > 0 && el('ul', { class: 'tags' }, data.genres.map((name) => el('li', {}, name))),
+            data.directors?.length > 0 &&
+              el('p', { class: 'detail-directors' }, 'Direção: ', data.directors.flatMap((director, i) => [i > 0 && ', ', el('a', { href: directorHref(director) }, director.name)])),
             data.overview ? el('p', { class: 'detail-overview' }, data.overview) : el('p', { class: 'detail-overview empty' }, 'Sem sinopse no catálogo.'),
             progress?.done && el('p', { class: 'detail-seen' }, '✓ Você já assistiu'),
             el('div', { class: 'detail-actions' }, el('a', { class: 'btn primary', href: watchHref({ type, id }) }, playLabel), listButton),
@@ -2265,6 +2378,16 @@ function route() {
     setActiveNav(null);
     searchInput.value = '';
     return renderTitle(match[1], match[2], token);
+  }
+  if (hash === '#/diretores') {
+    setActiveNav('directors');
+    searchInput.value = '';
+    return renderDirectors(params, token);
+  }
+  if ((match = hash.match(/^#\/diretor\/(\d{1,9})$/))) {
+    setActiveNav('directors');
+    searchInput.value = '';
+    return renderDirector(match[1], token);
   }
   if (hash === '#/perfil') {
     setActiveNav(null);

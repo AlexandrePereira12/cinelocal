@@ -207,6 +207,29 @@ test('recomendações: o último assistido (e não o último aberto) escolhe o t
   assert.equal(rows[0].title, 'Porque você assistiu Dez');
 });
 
+test('diretores: valida os parâmetros, repassa ao catálogo e responde 410 para diretor desconhecido', async () => {
+  const app = makeApp();
+  const { token } = await app.registerAndApprove();
+  const get = (path) => app.call('GET', path, { token });
+
+  assert.equal((await get('/api/directors')).status, 200);
+  assert.deepEqual(app.catalog.calls.at(-1), ['directors', { term: '', page: 1 }]);
+  assert.equal((await get('/api/directors?q=%20nolan%20&page=2')).status, 200);
+  assert.deepEqual(app.catalog.calls.at(-1), ['directors', { term: 'nolan', page: 2 }]);
+  assert.equal((await get('/api/directors?q=')).status, 200, 'busca vazia = sem filtro');
+  for (const bad of ['?q=a', '?page=0', '?page=abc', '?page=2001']) assert.equal((await get(`/api/directors${bad}`)).status, 400, bad);
+
+  const found = await get('/api/director/9001?page=3');
+  assert.equal(found.status, 200);
+  assert.equal(found.body.director.name, 'Diretora Teste');
+  assert.deepEqual(app.catalog.calls.at(-1), ['director', '9001', 3]);
+  const gone = await get('/api/director/123');
+  assert.equal(gone.status, 410, '410 e não 404: o netlify dev reenvia 404 para outro caminho');
+  assert.equal(gone.body.code, 'not_found');
+  assert.equal((await get('/api/director/9001?page=0')).status, 400);
+  assert.equal((await get('/api/director/abc')).status, 404);
+});
+
 test('explorar: repassa os filtros validados ao catálogo e recusa valor inválido', async () => {
   const app = makeApp();
   const { token } = await app.registerAndApprove();

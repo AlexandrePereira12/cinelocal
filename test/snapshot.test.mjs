@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { annotateNew, checkGates, collect, compactMovie, compactSeries, loadAvailableIds, refreshCatalog, serialize } from '../scripts/atualizar-catalogo.mjs';
+import { annotateNew, checkGates, collect, compactMovie, compactSeries, directorsOf, loadAvailableIds, refreshCatalog, serialize } from '../scripts/atualizar-catalogo.mjs';
 
 const noSleep = async () => {};
 const TODAY = '2026-10-11';
@@ -36,7 +36,7 @@ function fakeWorld({ movies = [101, 102], series = [201], tmdb = {}, declared } 
     const handler = tmdb[`${kind}:${id}`] ?? tmdb.default;
     if (handler) return handler(calls);
     return kind === 'movie'
-      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse', genres: Number(id) % 2 ? GENRES.slice(0, 6) : GENRES.slice(6) })
+      ? json({ id: Number(id), title: `Filme ${id}`, release_date: '2020-01-02', poster_path: `/p${id}.jpg`, vote_count: 10, vote_average: 7.25, popularity: 12.34, overview: 'Sinopse', genres: Number(id) % 2 ? GENRES.slice(0, 6) : GENRES.slice(6), credits: { crew: [{ id: 5000 + Number(id), name: `Diretor ${id}`, job: 'Director', profile_path: `/d${id}.jpg` }] } })
       : json({ id: Number(id), name: `Série ${id}`, first_air_date: '2019-03-04', vote_count: 5, vote_average: 8, popularity: 3, genres: TV_GENRES, seasons: [{ season_number: 1, episode_count: 4, air_date: '2019-03-04' }], last_episode_to_air: { season_number: 1, episode_number: 4 } });
   };
   return { fetchImpl, calls };
@@ -47,13 +47,15 @@ test('compactMovie mapeia os campos do TMDB, omite o que falta e descarta adulto
     id: 11, title: 'Título', original_title: 'Original', release_date: '2020-05-06', runtime: 95,
     poster_path: '/p.jpg', backdrop_path: '/b.jpg', vote_average: 7.26, vote_count: 321, popularity: 55.55, overview: '  Texto   com   espaços  ',
     genres: [{ id: 28, name: 'Ação' }, { id: 18, name: 'Drama' }, { id: 'x', name: 'inválido' }, null],
+    credits: { crew: [{ id: 77, name: 'Dir', job: 'Director' }] },
   });
-  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95, g: [28, 18] });
+  assert.deepEqual(entry, { i: 11, t: 'Título', ot: 'Original', y: '2020', d: '2020-05-06', p: '/p.jpg', b: '/b.jpg', r: 7.3, n: 321, v: 55.6, o: 'Texto com espaços', rt: 95, g: [28, 18], dr: [77] });
 
   const sparse = compactMovie({ id: 12, title: 'X', original_title: 'X', release_date: '', poster_path: '../x.jpg', vote_count: 0, vote_average: 0, runtime: 0, overview: '' });
   assert.deepEqual(JSON.parse(JSON.stringify(sparse)), { i: 12, t: 'X' }, 'sem título original igual, data, pôster inválido, nota sem votos, duração 0 ou sinopse vazia');
 
   assert.equal(compactMovie({ id: 13, title: 'Y', adult: true }), null);
+  assert.equal(compactMovie({ id: 16, title: 'Sem equipe' }).dr, undefined, 'sem diretor, o campo `dr` é omitido');
   assert.equal(compactMovie({ id: 14, title: '' }), null);
   assert.equal(compactMovie({ id: 15, title: 'Z', overview: 'a'.repeat(500) }).o.length, 240);
 });
@@ -112,6 +114,41 @@ test('all-ids: tenta de novo em erro 5xx e em timeout antes de desistir', async 
   await assert.rejects(loadAvailableIds({ fetchImpl: dead, sleep: noSleep }), /HTTP 500/);
 });
 
+test('directorsOf: só quem tem job Director, sem repetir, com teto e ignorando dado inválido', () => {
+  const crew = [
+    { id: 1, name: ' Ana Dir ', job: 'Director', profile_path: '/ana.jpg' },
+    { id: 2, name: 'Roteirista', job: 'Writer', profile_path: '/w.jpg' },
+    { id: 1, name: 'Ana Dir', job: 'Director' },
+    { id: 3, name: 'Sem foto', job: 'Director', profile_path: null },
+    { id: 4, name: '   ', job: 'Director' },
+    { id: 'x', name: 'Id ruim', job: 'Director' },
+    { id: 5, name: 'Foto ruim', job: 'Director', profile_path: '../x.jpg' },
+    { id: 6, name: 'Quarto', job: 'Director' },
+  ];
+  assert.deepEqual([...directorsOf({ credits: { crew } })], [
+    [1, { n: 'Ana Dir', p: '/ana.jpg' }],
+    [3, { n: 'Sem foto', p: undefined }],
+    [5, { n: 'Foto ruim', p: undefined }],
+  ], 'até 3, a repetição de Ana não conta e foto fora do padrão é descartada');
+  assert.equal(directorsOf({}).size, 0);
+  assert.equal(directorsOf({ credits: { crew: 'x' } }).size, 0);
+  assert.deepEqual(compactMovie({ id: 9, title: 'T', credits: { crew: crew.slice(0, 1) } }).dr, [1]);
+});
+
+test('coleta: guarda os diretores dos filmes que ficaram, em ordem de id, e descarta os dos filmes descartados', async () => {
+  const world = fakeWorld({
+    movies: [1, 2, 3],
+    series: [],
+    tmdb: {
+      'movie:3': () => json({ id: 3, title: 'Adulto', adult: true, credits: { crew: [{ id: 999, name: 'Fora', job: 'Director' }] } }),
+    },
+  });
+  const ids = await loadAvailableIds({ fetchImpl: world.fetchImpl, sleep: noSleep });
+  const result = await collect({ ids, token: 'T', fetchImpl: world.fetchImpl, today: TODAY, minIntervalMs: 0, sleep: noSleep });
+  assert.deepEqual(result.directors, { 5001: { n: 'Diretor 1', p: '/d1.jpg' }, 5002: { n: 'Diretor 2', p: '/d2.jpg' } });
+  assert.deepEqual(result.movies.map((m) => m.dr), [[5001], [5002]]);
+});
+
 test('coleta: 404 do TMDB é contado à parte, 429 respeita Retry-After e adulto é descartado', async () => {
   const sleeps = [];
   let limited = 0;
@@ -144,7 +181,7 @@ test('coleta: usa Bearer, língua pt-BR e aborta com mensagem clara se o token f
     /TMDB recusou o token/,
   );
   assert.equal(seen[0].auth, 'Bearer segredo');
-  assert.ok(seen[0].url.endsWith('/3/movie/1?language=pt-BR'));
+  assert.ok(seen[0].url.endsWith('/3/movie/1?language=pt-BR&append_to_response=credits'), 'filme pede os créditos na mesma chamada');
 });
 
 test('gates rejeitam snapshot ruim', () => {
@@ -156,6 +193,8 @@ test('gates rejeitam snapshot ruim', () => {
   assert.match(checkGates({ stats: { total: 0, ok: 0, notFound: 0, failed: 0, discarded: 0 }, kept: 0, previousTotal: 0 })[0], /nenhum título/);
   assert.match(checkGates({ stats: ok, kept: 990, previousTotal: 0, genreCount: 3 })[0], /só 3 gêneros/);
   assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, genreCount: 19 }), []);
+  assert.match(checkGates({ stats: ok, kept: 990, previousTotal: 0, movies: 900, directed: 100 })[0], /só 100 de 900 filmes trouxeram diretor/);
+  assert.deepEqual(checkGates({ stats: ok, kept: 990, previousTotal: 0, movies: 900, directed: 850 }), []);
 });
 
 test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com um ruim', async () => {
@@ -176,6 +215,9 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   assert.deepEqual(mod.default.series[0].g, [10759, 18]);
   assert.deepEqual(mod.default.tvGenres, { 10759: 'Ação e Aventura', 18: 'Drama' });
   assert.equal(Object.keys(mod.default.genres).length, 12);
+  assert.equal(Object.keys(mod.default.directors).length, 10);
+  assert.deepEqual(mod.default.directors[5001], { n: 'Diretor 1', p: '/d1.jpg' });
+  assert.deepEqual(mod.default.movies[0].dr, [5001]);
   assert.deepEqual(mod.default.movies[0].g, GENRES.slice(0, 6).map((g) => g.id), 'filme 1 (ímpar) traz os ids do 1º grupo');
   assert.ok(written.split('\n').filter((line) => line.startsWith('    {')).length === 12, 'um item por linha');
   assert.ok(!written.includes('TMDB_TOKEN') && !written.includes('Bearer'), 'nenhum segredo no arquivo');
@@ -184,6 +226,17 @@ test('refreshCatalog grava um módulo importável e nunca sobrescreve o bom com 
   const broken = fakeWorld({ movies: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], series: [20, 21], tmdb: { default: () => json({}, 400) } });
   await assert.rejects(refreshCatalog({ ...common, fetchImpl: broken.fetchImpl }), /snapshot rejeitado.*falhas de rede/s);
   assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto');
+
+  // TMDB sem créditos (mudança de formato): gate barra, senão a seção de diretores ficaria vazia em produção
+  const noCredits = async (url, init) => {
+    const res = await good.fetchImpl(url, init);
+    if (!/\/3\/movie\//.test(url)) return res;
+    const body = await res.json();
+    delete body.credits;
+    return json(body);
+  };
+  await assert.rejects(refreshCatalog({ ...common, fetchImpl: noCredits }), /só 0 de 10 filmes trouxeram diretor/);
+  assert.equal(readFileSync(file, 'utf8'), written, 'arquivo anterior intacto também sem créditos');
 
   // TMDB sem gêneros (mudança de formato, por exemplo): gate barra, senão a seleção de gêneros quebraria em produção
   const noGenres = async (url, init) => {
@@ -211,11 +264,12 @@ test('serialize gera JS válido mesmo com aspas e caracteres especiais no títul
   const dir = mkdtempSync(join(tmpdir(), 'catalogo-'));
   const file = join(dir, 'c.mjs');
   const tricky = { i: 1, t: 'Título "com aspas" e \\ barra   separador', y: '2020' };
-  writeFileSync(file, serialize({ generatedAt: '2026-01-01T00:00:00Z', genres: { 28: 'Ação', 18: 'Drama' }, tvGenres: { 10759: 'Ação e Aventura' }, movies: [tricky], series: [] }));
+  writeFileSync(file, serialize({ generatedAt: '2026-01-01T00:00:00Z', genres: { 28: 'Ação', 18: 'Drama' }, tvGenres: { 10759: 'Ação e Aventura' }, directors: { 7: { n: 'Zé "Aspas"', p: '/z.jpg' }, 8: { n: 'Sem Foto' } }, movies: [tricky], series: [] }));
   const mod = await import(pathToFileURL(file).href);
   assert.equal(mod.default.movies[0].t, tricky.t);
   assert.deepEqual(mod.default.genres, { 18: 'Drama', 28: 'Ação' });
   assert.deepEqual(mod.default.tvGenres, { 10759: 'Ação e Aventura' });
+  assert.deepEqual(mod.default.directors, { 7: { n: 'Zé "Aspas"', p: '/z.jpg' }, 8: { n: 'Sem Foto' } });
 });
 
 test('annotateNew: só id novo ganha `a`, quem já estava mantém o seu e `a` velho some', () => {
