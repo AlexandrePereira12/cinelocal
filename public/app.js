@@ -2968,17 +2968,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// Aviso temporário: o provedor dos vídeos está fora do ar. Remover esta função e a chamada em boot() quando voltar.
-function showUnavailableNotice() {
-  const dialog = showDialog(
-    'Catálogo indisponível',
-    el('p', { class: 'modal-intro' }, 'Filmes e séries estão temporariamente indisponíveis. Estamos aguardando o serviço voltar. Tente novamente mais tarde.'),
-    el('button', { class: 'btn primary', type: 'button', onclick: () => dialog.close() }, 'Entendi'),
-  );
-}
-
 async function boot() {
-  showUnavailableNotice();
   updateChrome();
   if (session.token) {
     try {

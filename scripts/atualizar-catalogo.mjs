@@ -453,6 +453,9 @@ async function main() {
     await refreshCatalog({ token });
   } catch (err) {
     console.error(`ERRO: ${err.message}`);
+    if (/embedplayapi/.test(err.message) || err.cause) {
+      console.error('Se o embedplayapi.top não responde, a rede pode estar bloqueando o domínio: troque o DNS para 1.1.1.1 ou ative a VPN 1.1.1.1 e rode de novo.');
+    }
     process.exit(1);
   }
 }

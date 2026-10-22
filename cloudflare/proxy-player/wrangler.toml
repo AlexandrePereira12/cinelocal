@@ -1,0 +1,8 @@
+# Deploy do proxy do player (ver README.md). Reserva: não é publicado enquanto o site não precisar dele.
+name = "cinelocal-player-proxy"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Origem do site que embute o player (https, sem barra no final). Troque pelo endereço real do Netlify.
+SITE_ORIGIN = "https://TROQUE-PELO-SEU-SITE.netlify.app"
